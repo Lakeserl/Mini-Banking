@@ -1,0 +1,5 @@
+docs/*
+.github/skills/code-review/SKILL.md
+.github/*
+.vscode/
+.gitkeep
