@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: mini-banking
+  datasource:
+    url: jdbc:postgresql://localhost:5410/walletledger
+    username: lakeserl
+    password: ${POSTGRES_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      # DEV ONLY: lets Hibernate create/alter the events and snapshots tables.
+      # Never use "update" in production (cannot drop/rename columns, can lock or damage the DB):
+      # use "validate" there and manage schema changes explicitly.
+      ddl-auto: update
