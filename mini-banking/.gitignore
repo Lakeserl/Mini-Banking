@@ -35,4 +35,5 @@ build/
 /docs/
 .jqwik-database
 
-
+mini-banking/AGENTS.md
+mini-banking/graphify-out/*
