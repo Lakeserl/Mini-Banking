@@ -60,9 +60,6 @@ public class WalletCommandHandler {
 		Objects.requireNonNull(ownerId, "ownerId must not be null");
 		Objects.requireNonNull(currency, "currency must not be null");
 		UUID walletId = Wallet.calculateWalletId(ownerId, currency);
-		if (repository.load(walletId).isPresent()) {
-			throw new WalletAlreadyExistsException(ownerId, currency);
-		}
 		Wallet wallet = Wallet.open(walletId, ownerId, currency);
 		try {
 			repository.save(wallet);

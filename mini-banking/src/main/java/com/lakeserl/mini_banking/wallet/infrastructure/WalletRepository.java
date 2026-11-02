@@ -70,6 +70,13 @@ public class WalletRepository {
 			} else if (eventStore.latestVersion(walletId) < snapshot.version()) {
 				log.warn("Snapshot version {} is ahead of event store. Falling back to full replay.", snapshot.version());
 				snapshotValid = false;
+			} else if (snapshot.lastEventId() == null || eventStore.findEvent(snapshot.lastEventId())
+					.filter(event -> walletId.equals(event.aggregateId()) && event.version() == snapshot.version()
+							&& AGGREGATE_TYPE.equals(event.aggregateType()))
+					.isEmpty()) {
+				log.warn("Snapshot event anchor is invalid for wallet {} at version {}. Falling back to full replay.",
+						walletId, snapshot.version());
+				snapshotValid = false;
 			}
 
 			if (snapshotValid) {
@@ -82,6 +89,8 @@ public class WalletRepository {
 								state.balance(), walletId);
 					} else if (state.currency() == null || state.status() == null || state.ownerId() == null) {
 						log.warn("Snapshot state has null required fields for wallet {}. Falling back to full replay.", walletId);
+					} else if (snapshot.stateHash() == null || !snapshot.stateHash().equals(state.integrityHash())) {
+						log.warn("Snapshot state hash mismatch for wallet {}. Falling back to full replay.", walletId);
 					} else {
 						wallet = Wallet.fromSnapshot(state, snapshot.version());
 						fromVersion = snapshot.version();
@@ -135,6 +144,7 @@ public class WalletRepository {
 			return;
 		}
 		long before = wallet.committedVersion();
+		UUID lastEventId = wallet.uncommittedEvents().get(wallet.uncommittedEvents().size() - 1).eventId();
 		eventStore.append(wallet.id(), AGGREGATE_TYPE, before, wallet.uncommittedEvents());
 		wallet.markCommitted();
 		long after = wallet.committedVersion();
@@ -142,8 +152,9 @@ public class WalletRepository {
 		// Snapshot is a best-effort optimization; failures should not invalidate committed events.
 		if (before / snapshotInterval != after / snapshotInterval) {
 			try {
-				snapshotStore.save(wallet.id(), AGGREGATE_TYPE, after, WalletSnapshot.SCHEMA_VERSION,
-						serializer.toJson(wallet.toSnapshot()));
+				WalletSnapshot snapshot = wallet.toSnapshot();
+				snapshotStore.save(wallet.id(), AGGREGATE_TYPE, after, lastEventId, WalletSnapshot.SCHEMA_VERSION,
+						snapshot.integrityHash(), serializer.toJson(snapshot));
 			} catch (Exception e) {
 				log.warn("Failed to save snapshot for wallet {} at version {}: {}", wallet.id(), after, e.getMessage());
 			}
