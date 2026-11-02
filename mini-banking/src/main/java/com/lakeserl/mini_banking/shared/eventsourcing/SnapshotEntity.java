@@ -31,8 +31,14 @@ public class SnapshotEntity {
 	@Column(name = "version", nullable = false)
 	private long version;
 
+	@Column(name = "last_event_id", nullable = false)
+	private UUID lastEventId;
+
 	@Column(name = "snapshot_schema_version", nullable = false)
 	private int snapshotSchemaVersion;
+
+	@Column(name = "state_hash", nullable = false, length = 64)
+	private String stateHash;
 
 	@JdbcTypeCode(SqlTypes.JSON)
 	@Column(name = "state", nullable = false, columnDefinition = "jsonb")
