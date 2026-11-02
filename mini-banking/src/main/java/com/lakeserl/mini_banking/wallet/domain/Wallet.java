@@ -66,14 +66,40 @@ public final class Wallet extends AggregateRoot {
 	}
 
 	public static Wallet fromStoredEvents(java.util.List<StoredEvent> events) {
-		Objects.requireNonNull(events, "events must not be null");
 		Wallet wallet = new Wallet();
 		wallet.loadFromStoredEvents(events);
 		return wallet;
 	}
 
+	@Override
+	public void loadFromStoredEvents(java.util.List<StoredEvent> events) {
+		Objects.requireNonNull(events, "events must not be null");
+		for (StoredEvent stored : events) {
+			Objects.requireNonNull(stored, "stored event must not be null");
+			Objects.requireNonNull(stored.aggregateId(), "stored aggregateId must not be null");
+			if (!"Wallet".equals(stored.aggregateType()) || !stored.aggregateId().equals(walletIdFrom(stored.event()))) {
+				throw new IllegalStateException("Stored wallet event does not match its aggregate envelope");
+			}
+		}
+		super.loadFromStoredEvents(events);
+	}
+
+	private UUID walletIdFrom(DomainEvent event) {
+		return switch (event) {
+			case WalletOpened e -> e.walletId();
+			case WalletCredited e -> e.walletId();
+			case WalletDebited e -> e.walletId();
+			case WalletLocked e -> e.walletId();
+			default -> throw new IllegalArgumentException("Unknown wallet event: " + event.getClass());
+		};
+	}
+
 	public static Wallet fromSnapshot(WalletSnapshot snapshot, long version) {
 		Objects.requireNonNull(snapshot, "snapshot must not be null");
+		if (version < 1 || snapshot.walletId() == null || snapshot.ownerId() == null || snapshot.currency() != Currency.VND
+				|| snapshot.status() == null || snapshot.balance() < 0) {
+			throw new IllegalArgumentException("Snapshot contains invalid wallet state or version");
+		}
 		Wallet wallet = new Wallet();
 		wallet.walletId = snapshot.walletId();
 		wallet.ownerId = snapshot.ownerId();
@@ -176,8 +202,14 @@ public final class Wallet extends AggregateRoot {
 		Objects.requireNonNull(event, "event must not be null");
 		switch (event) {
 			case WalletOpened e -> {
-				if (walletId != null && !walletId.equals(e.walletId())) {
-					throw new IllegalStateException("Event walletId " + e.walletId() + " does not match wallet " + walletId);
+				if (walletId != null) {
+					throw new IllegalStateException("Wallet is already opened: " + walletId);
+				}
+				Objects.requireNonNull(e.walletId(), "WalletOpened.walletId must not be null");
+				Objects.requireNonNull(e.ownerId(), "WalletOpened.ownerId must not be null");
+				Objects.requireNonNull(e.currency(), "WalletOpened.currency must not be null");
+				if (e.currency() != Currency.VND) {
+					throw new IllegalStateException("Unsupported wallet currency in history: " + e.currency());
 				}
 				walletId = e.walletId();
 				ownerId = e.ownerId();
@@ -186,21 +218,45 @@ public final class Wallet extends AggregateRoot {
 				status = WalletStatus.ACTIVE;
 			}
 			case WalletCredited e -> {
-				if (walletId != null && !walletId.equals(e.walletId())) {
+				if (walletId == null) {
+					throw new IllegalStateException("History must start with WalletOpened");
+				}
+				if (!walletId.equals(e.walletId())) {
 					throw new IllegalStateException("Event walletId " + e.walletId() + " does not match wallet " + walletId);
+				}
+				Objects.requireNonNull(e.amount(), "WalletCredited.amount must not be null");
+				Objects.requireNonNull(e.transactionId(), "WalletCredited.transactionId must not be null");
+				Objects.requireNonNull(e.counterpartAccountId(), "WalletCredited.counterpartAccountId must not be null");
+				Objects.requireNonNull(e.counterpartAccountType(), "WalletCredited.counterpartAccountType must not be null");
+				if (!e.amount().isPositive()) {
+					throw new IllegalStateException("WalletCredited amount must be positive");
 				}
 				balance = balance.plus(e.amount());
 			}
 			case WalletDebited e -> {
-				if (walletId != null && !walletId.equals(e.walletId())) {
+				if (walletId == null) {
+					throw new IllegalStateException("History must start with WalletOpened");
+				}
+				if (!walletId.equals(e.walletId())) {
 					throw new IllegalStateException("Event walletId " + e.walletId() + " does not match wallet " + walletId);
+				}
+				Objects.requireNonNull(e.amount(), "WalletDebited.amount must not be null");
+				Objects.requireNonNull(e.transactionId(), "WalletDebited.transactionId must not be null");
+				Objects.requireNonNull(e.counterpartAccountId(), "WalletDebited.counterpartAccountId must not be null");
+				Objects.requireNonNull(e.counterpartAccountType(), "WalletDebited.counterpartAccountType must not be null");
+				if (!e.amount().isPositive() || balance.isLessThan(e.amount())) {
+					throw new IllegalStateException("WalletDebited amount violates wallet balance invariants");
 				}
 				balance = balance.minus(e.amount());
 			}
 			case WalletLocked e -> {
-				if (walletId != null && !walletId.equals(e.walletId())) {
+				if (walletId == null) {
+					throw new IllegalStateException("History must start with WalletOpened");
+				}
+				if (!walletId.equals(e.walletId())) {
 					throw new IllegalStateException("Event walletId " + e.walletId() + " does not match wallet " + walletId);
 				}
+				Objects.requireNonNull(e.reason(), "WalletLocked.reason must not be null");
 				status = WalletStatus.LOCKED;
 			}
 			default -> throw new IllegalArgumentException("Unknown wallet event: " + event.getClass());
