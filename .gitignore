@@ -1,5 +1,10 @@
 docs/*
+phase0-review-project-roadmap.md
 .github/skills/code-review/SKILL.md
 .github/*
 .vscode/
 .gitkeep
+graphify-out/*
+.env
+.env.*
+!.env.example

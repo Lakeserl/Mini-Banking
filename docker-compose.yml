@@ -5,9 +5,9 @@ services:
     environment:
       POSTGRES_DB: walletledger
       POSTGRES_USER: lakeserl
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env file}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,6 +15,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - walletledger
 
 volumes:
   postgres_data:
+
+networks:
+  walletledger:
+    driver: bridge
