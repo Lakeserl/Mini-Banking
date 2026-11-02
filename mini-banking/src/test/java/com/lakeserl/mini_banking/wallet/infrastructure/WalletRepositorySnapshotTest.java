@@ -127,6 +127,32 @@ class WalletRepositorySnapshotTest {
 	}
 
 	@Test
+	void repositoryRejectsSnapshotWithTamperedBalance() {
+		WalletRepository repository = new WalletRepository(eventStore, snapshotStore, serializer, 10);
+		Wallet written = walletWithMovements(repository, 14);
+		WalletSnapshot tampered = new WalletSnapshot(written.id(), written.ownerId(), written.currency(),
+				written.balance().amount() + 1, written.status());
+		jdbc.update("UPDATE snapshots SET state = ?::jsonb WHERE aggregate_id = ?",
+				serializer.toJson(tampered), written.id());
+
+		Wallet loaded = repository.load(written.id()).orElseThrow();
+		assertThat(loaded.balance()).isEqualTo(written.balance());
+		assertThat(loaded.toSnapshot()).isEqualTo(written.toSnapshot());
+	}
+
+	@Test
+	void repositoryRejectsSnapshotWithWrongLastEventAnchor() {
+		WalletRepository repository = new WalletRepository(eventStore, snapshotStore, serializer, 10);
+		Wallet written = walletWithMovements(repository, 14);
+		jdbc.update("UPDATE snapshots SET last_event_id = ? WHERE aggregate_id = ?",
+				UUID.randomUUID(), written.id());
+
+		Wallet loaded = repository.load(written.id()).orElseThrow();
+		assertThat(loaded.balance()).isEqualTo(written.balance());
+		assertThat(loaded.committedVersion()).isEqualTo(written.version());
+	}
+
+	@Test
 	void repositoryRejectsNonContiguousEventVersions() {
 		WalletRepository repository = new WalletRepository(eventStore, snapshotStore, serializer, 100);
 		UUID corruptedWalletId = UUID.randomUUID();
@@ -157,7 +183,8 @@ class WalletRepositorySnapshotTest {
 		// Create a repository with a broken snapshot store that always fails
 		PostgresSnapshotStore failingSnapshotStore = new PostgresSnapshotStore(jdbc) {
 			@Override
-			public void save(UUID aggregateId, String aggregateType, long version, int schemaVersion, String stateJson) {
+			public void save(UUID aggregateId, String aggregateType, long version, UUID lastEventId, int schemaVersion,
+					String stateHash, String stateJson) {
 				throw new RuntimeException("Simulated snapshot storage failure");
 			}
 		};
