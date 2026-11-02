@@ -1,6 +1,8 @@
 package com.lakeserl.mini_banking.shared.eventsourcing;
 
+import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -17,7 +19,7 @@ import com.lakeserl.mini_banking.shared.domain.PendingEvent;
 
 /**
  * Append-only PostgreSQL event store. Events are immutable once written; triggers installed by
- * {@link EventStoreImmutabilityGuard} reject UPDATE, DELETE and TRUNCATE.
+ * Flyway migrations reject UPDATE, DELETE and TRUNCATE.
  * Optimistic concurrency is enforced by {@code UNIQUE (aggregate_id, version)}.
  */
 @Repository
@@ -41,12 +43,14 @@ public class PostgresEventStore implements EventStore {
 	private final JdbcTemplate jdbc;
 	private final TransactionTemplate tx;
 	private final EventSerializer serializer;
+	private final Clock clock;
 	private final RowMapper<StoredEvent> storedEventRowMapper;
 
-	public PostgresEventStore(JdbcTemplate jdbc, TransactionTemplate tx, EventSerializer serializer) {
+	public PostgresEventStore(JdbcTemplate jdbc, TransactionTemplate tx, EventSerializer serializer, Clock clock) {
 		this.jdbc = jdbc;
 		this.tx = tx;
 		this.serializer = serializer;
+		this.clock = clock;
 		this.storedEventRowMapper = (rs, i) -> new StoredEvent(
 				rs.getObject("event_id", UUID.class),
 				rs.getObject("aggregate_id", UUID.class),
@@ -77,7 +81,7 @@ public class PostgresEventStore implements EventStore {
 		if (events.stream().anyMatch(Objects::isNull)) {
 			throw new IllegalArgumentException("events must not contain null values");
 		}
-		OffsetDateTime now = OffsetDateTime.now();
+		OffsetDateTime now = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
 		tx.executeWithoutResult(status -> {
 			long actualVersion = latestVersion(aggregateId);
 			if (actualVersion != expectedVersion) {
@@ -110,38 +114,33 @@ public class PostgresEventStore implements EventStore {
 				String constraint = psqlEx.getServerErrorMessage() != null
 						? psqlEx.getServerErrorMessage().getConstraint()
 						: null;
-				if (constraint != null) {
-					if (constraint.equalsIgnoreCase(UQ_AGGREGATE_VERSION)) {
-						throw new OptimisticConcurrencyException(
-								"Version " + version + " of aggregate " + aggregateId + " already exists", e);
-					}
-					if (constraint.equalsIgnoreCase(PK_EVENT_ID) || constraint.equalsIgnoreCase("events_pkey")) {
-						throw new DuplicateEventException(eventId, e);
-					}
+				if (UQ_AGGREGATE_VERSION.equals(constraint)) {
+					throw new OptimisticConcurrencyException(
+							"Version " + version + " of aggregate " + aggregateId + " already exists", e);
 				}
+				if (PK_EVENT_ID.equals(constraint)) {
+					throw new DuplicateEventException(eventId, e);
+				}
+				throw e;
 			}
 			cause = cause.getCause();
-		}
-		// Fallback to error message containment check for portability
-		String message = String.valueOf(e.getMessage());
-		if (message.contains(UQ_AGGREGATE_VERSION)) {
-			throw new OptimisticConcurrencyException(
-					"Version " + version + " of aggregate " + aggregateId + " already exists", e);
-		}
-		if (message.contains(PK_EVENT_ID) || message.contains("events_pkey")) {
-			throw new DuplicateEventException(eventId, e);
 		}
 		throw e;
 	}
 
 	@Override
 	public List<StoredEvent> load(UUID aggregateId, long afterVersion) {
+		Objects.requireNonNull(aggregateId, "aggregateId must not be null");
+		if (afterVersion < 0) {
+			throw new IllegalArgumentException("afterVersion must not be negative");
+		}
 		return jdbc.query("SELECT " + SELECT_COLUMNS + " FROM events WHERE aggregate_id = ? AND version > ? ORDER BY version",
 				storedEventRowMapper, aggregateId, afterVersion);
 	}
 
 	@Override
 	public boolean contains(UUID eventId) {
+		Objects.requireNonNull(eventId, "eventId must not be null");
 		Boolean exists = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM events WHERE event_id = ?)",
 				Boolean.class, eventId);
 		return Boolean.TRUE.equals(exists);
@@ -149,6 +148,7 @@ public class PostgresEventStore implements EventStore {
 
 	@Override
 	public Optional<StoredEvent> findEvent(UUID eventId) {
+		Objects.requireNonNull(eventId, "eventId must not be null");
 		List<StoredEvent> results = jdbc.query("SELECT " + SELECT_COLUMNS + " FROM events WHERE event_id = ?",
 				storedEventRowMapper, eventId);
 		return results.stream().findFirst();
@@ -156,6 +156,7 @@ public class PostgresEventStore implements EventStore {
 
 	@Override
 	public long latestVersion(UUID aggregateId) {
+		Objects.requireNonNull(aggregateId, "aggregateId must not be null");
 		Long max = jdbc.queryForObject(
 				"SELECT COALESCE(MAX(version), 0) FROM events WHERE aggregate_id = ?",
 				Long.class, aggregateId);

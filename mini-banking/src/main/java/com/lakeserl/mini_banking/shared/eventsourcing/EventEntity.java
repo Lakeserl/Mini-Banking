@@ -14,9 +14,8 @@ import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 
 /**
- * Schema definition of the {@code events} table, used only so Hibernate's {@code ddl-auto} creates it.
- * Rows are never read or written through JPA (see {@link PostgresEventStore}, ADR-008). The append-only
- * trigger is installed by {@link EventStoreImmutabilityGuard}.
+ * Schema mapping for Hibernate validation. Flyway owns table and trigger creation; rows are never read
+ * or written through JPA (see {@link PostgresEventStore}, ADR-008).
  * The constraint names are relied on by the store to tell version conflicts from duplicate event ids.
  */
 @Entity
