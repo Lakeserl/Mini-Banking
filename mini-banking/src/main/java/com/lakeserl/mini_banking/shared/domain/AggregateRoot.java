@@ -3,6 +3,7 @@ package com.lakeserl.mini_banking.shared.domain;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 import com.lakeserl.mini_banking.shared.eventsourcing.StoredEvent;
@@ -41,41 +42,55 @@ public abstract class AggregateRoot {
 		uncommitted.clear();
 	}
 
-	/** Replays already persisted domain events without stored version metadata (used in simple in-memory tests). */
+	/** Replays already persisted domain events; stream continuity is validated at the repository boundary. */
 	public void loadFromHistory(Iterable<? extends DomainEvent> history) {
+		Objects.requireNonNull(history, "history must not be null");
 		for (DomainEvent event : history) {
+			Objects.requireNonNull(event, "history event must not be null");
 			when(event);
 			committedVersion++;
 		}
 	}
 
-	/**
-	 * Replays persisted events from the event store, validating version continuity.
-	 *
-	 * @throws IllegalStateException if an event has a non-contiguous version.
-	 */
+	/** Replays persisted events while preserving and validating their stored versions. */
 	public void loadFromStoredEvents(List<StoredEvent> events) {
-		if (events == null || events.isEmpty()) {
-			throw new IllegalArgumentException("events must not be null or empty");
+		Objects.requireNonNull(events, "events must not be null");
+		if (events.isEmpty()) {
+			throw new IllegalArgumentException("events must not be empty");
 		}
+
+		long expectedVersion = committedVersion + 1;
+		UUID expectedAggregateId = id();
 		for (StoredEvent stored : events) {
-			if (stored == null || stored.event() == null) {
-				throw new IllegalArgumentException("stored events must not contain null values");
+			Objects.requireNonNull(stored, "stored event must not be null");
+			Objects.requireNonNull(stored.eventId(), "stored event id must not be null");
+			Objects.requireNonNull(stored.aggregateId(), "stored aggregate id must not be null");
+			Objects.requireNonNull(stored.aggregateType(), "stored aggregate type must not be null");
+			Objects.requireNonNull(stored.eventType(), "stored event type must not be null");
+			Objects.requireNonNull(stored.event(), "stored event payload must not be null");
+			if (stored.schemaVersion() < 1 || !stored.eventType().equals(stored.event().eventType())) {
+				throw new IllegalStateException("Stored event metadata does not match its payload");
 			}
-			long expected = committedVersion + 1;
-			if (stored.version() < 1) {
-				throw new IllegalStateException("Event version must be positive but was " + stored.version());
-			}
-			if (stored.version() != expected) {
+			if (stored.version() != expectedVersion) {
 				throw new IllegalStateException(
-						"Non-contiguous event version: expected " + expected + " but got " + stored.version());
+						"Non-contiguous event version: expected " + expectedVersion + " but got " + stored.version());
 			}
+			if (expectedAggregateId != null && !expectedAggregateId.equals(stored.aggregateId())) {
+				throw new IllegalStateException("Stored event belongs to another aggregate: " + stored.aggregateId());
+			}
+			if (expectedAggregateId == null) {
+				expectedAggregateId = stored.aggregateId();
+			}
+			expectedVersion++;
+		}
+
+		for (StoredEvent stored : events) {
 			when(stored.event());
 			committedVersion = stored.version();
 		}
 	}
 
-	public void restoreCommittedVersion(long version) {
+	protected void restoreCommittedVersion(long version) {
 		this.committedVersion = version;
 	}
 
