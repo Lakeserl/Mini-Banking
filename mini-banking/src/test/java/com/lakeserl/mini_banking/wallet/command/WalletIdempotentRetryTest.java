@@ -24,6 +24,7 @@ import com.lakeserl.mini_banking.shared.eventsourcing.StoredEvent;
 import com.lakeserl.mini_banking.wallet.command.WalletCommandHandler.ApplyResult;
 import com.lakeserl.mini_banking.wallet.domain.events.WalletDebited;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InsufficientFundsException;
+import com.lakeserl.mini_banking.wallet.domain.exceptions.WalletAlreadyExistsException;
 import com.lakeserl.mini_banking.wallet.infrastructure.WalletRepository;
 
 /** Simulates saga recovery retrying a step that was already applied before the pod died. */
@@ -146,5 +147,74 @@ class WalletIdempotentRetryTest {
 
 		assertThatThrownBy(() -> handler.openWallet(ownerId, Currency.VND))
 				.isInstanceOf(com.lakeserl.mini_banking.wallet.domain.exceptions.WalletAlreadyExistsException.class);
+	}
+
+	@Test
+	void concurrentWalletOpensForSameOwnerCreateExactlyOneWallet() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		int callers = 2;
+		ExecutorService pool = Executors.newFixedThreadPool(callers);
+		CountDownLatch ready = new CountDownLatch(callers);
+		CountDownLatch go = new CountDownLatch(1);
+		try {
+			List<Future<Boolean>> results = new ArrayList<>();
+			for (int i = 0; i < callers; i++) {
+				results.add(pool.submit(() -> {
+					ready.countDown();
+					go.await();
+					try {
+						handler.openWallet(ownerId, Currency.VND);
+						return true;
+					} catch (WalletAlreadyExistsException e) {
+						return false;
+					}
+				}));
+			}
+			assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+			go.countDown();
+			assertThat(results.stream().filter(result -> get(result)).count()).isEqualTo(1);
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	void concurrentDifferentDebitsCannotOverdrawWallet() throws Exception {
+		UUID walletId = fundedWallet(1_000);
+		int callers = 2;
+		ExecutorService pool = Executors.newFixedThreadPool(callers);
+		CountDownLatch ready = new CountDownLatch(callers);
+		CountDownLatch go = new CountDownLatch(1);
+		try {
+			List<Future<Boolean>> results = new ArrayList<>();
+			for (int i = 0; i < callers; i++) {
+				UUID tx = UUID.randomUUID();
+				results.add(pool.submit(() -> {
+					ready.countDown();
+					go.await();
+					try {
+						handler.debit(walletId, tx, Money.vnd(700), "TRANSFER_CLEARING", AccountType.CLEARING);
+						return true;
+					} catch (InsufficientFundsException e) {
+						return false;
+					}
+				}));
+			}
+			assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+			go.countDown();
+			assertThat(results.stream().filter(WalletIdempotentRetryTest::get).count()).isEqualTo(1);
+			assertThat(debitEvents(walletId)).isEqualTo(1);
+			assertThat(repository.load(walletId).orElseThrow().balance()).isEqualTo(Money.vnd(300));
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	private static boolean get(Future<Boolean> result) {
+		try {
+			return result.get(30, TimeUnit.SECONDS);
+		} catch (Exception e) {
+			throw new AssertionError("Concurrent command failed", e);
+		}
 	}
 }

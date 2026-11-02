@@ -7,6 +7,8 @@ import java.lang.annotation.Target;
 
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
+import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
+import org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.TestPropertySource;
@@ -15,7 +17,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.lakeserl.mini_banking.shared.eventsourcing.EventSerializer;
 import com.lakeserl.mini_banking.shared.eventsourcing.EventSourcingConfig;
-import com.lakeserl.mini_banking.shared.eventsourcing.EventStoreImmutabilityGuard;
 import com.lakeserl.mini_banking.shared.eventsourcing.PostgresEventStore;
 import com.lakeserl.mini_banking.shared.eventsourcing.PostgresSnapshotStore;
 
@@ -30,10 +31,11 @@ import com.lakeserl.mini_banking.shared.eventsourcing.PostgresSnapshotStore;
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @ContextConfiguration(initializers = PostgresContainerInitializer.class)
 @TestPropertySource(properties = {
-		"spring.jpa.hibernate.ddl-auto=update",
+		"spring.jpa.hibernate.ddl-auto=validate",
 		"spring.datasource.hikari.maximum-pool-size=30" })
+@ImportAutoConfiguration(FlywayAutoConfiguration.class)
 @Import({ EventSourcingConfig.class, EventSerializer.class, PostgresEventStore.class,
-		PostgresSnapshotStore.class, EventStoreImmutabilityGuard.class,
+		PostgresSnapshotStore.class,
 		com.lakeserl.mini_banking.wallet.infrastructure.WalletEventTypes.class,
 		com.lakeserl.mini_banking.wallet.infrastructure.WalletRepository.class,
 		com.lakeserl.mini_banking.wallet.command.WalletCommandHandler.class })

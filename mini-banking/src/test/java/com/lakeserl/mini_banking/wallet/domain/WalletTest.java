@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.UUID;
+import java.time.Instant;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -13,6 +15,7 @@ import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.CurrencyMismatchException;
 import com.lakeserl.mini_banking.shared.domain.DeterministicIds;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.eventsourcing.StoredEvent;
 import com.lakeserl.mini_banking.wallet.domain.events.WalletCredited;
 import com.lakeserl.mini_banking.wallet.domain.events.WalletOpened;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InsufficientFundsException;
@@ -177,6 +180,30 @@ class WalletTest {
 		assertThatThrownBy(() -> wallet.loadFromHistory(java.util.List.of(mismatchedEvent)))
 				.isInstanceOf(IllegalStateException.class)
 				.hasMessageContaining("does not match wallet");
+	}
+
+	@Test
+	void storedReplayRejectsPayloadForDifferentAggregateEnvelope() {
+		UUID storedWalletId = UUID.randomUUID();
+		UUID payloadWalletId = UUID.randomUUID();
+		WalletOpened opened = new WalletOpened(payloadWalletId, ownerId, Currency.VND);
+		StoredEvent stored = new StoredEvent(UUID.randomUUID(), storedWalletId, "Wallet", 1, "WalletOpened", 1,
+				Instant.now(), storedWalletId, null, opened);
+
+		assertThatThrownBy(() -> Wallet.fromStoredEvents(List.of(stored)))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("does not match its aggregate envelope");
+	}
+
+	@Test
+	void storedReplayRejectsInvalidInitialVersion() {
+		WalletOpened opened = new WalletOpened(walletId, ownerId, Currency.VND);
+		StoredEvent stored = new StoredEvent(UUID.randomUUID(), walletId, "Wallet", 2, "WalletOpened", 1,
+				Instant.now(), walletId, null, opened);
+
+		assertThatThrownBy(() -> Wallet.fromStoredEvents(List.of(stored)))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("Non-contiguous event version");
 	}
 
 	@Test
