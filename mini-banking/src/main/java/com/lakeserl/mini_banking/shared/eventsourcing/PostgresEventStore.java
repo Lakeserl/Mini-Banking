@@ -35,6 +35,11 @@ public class PostgresEventStore implements EventStore {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
 			""";
 
+	private static final String INSERT_OUTBOX = """
+			INSERT INTO outbox (event_id, aggregate_id, aggregate_type, event_type, payload, created_at)
+			VALUES (?, ?, ?, ?, ?::jsonb, ?)
+			""";
+
 	private static final String SELECT_COLUMNS = """
 			event_id, aggregate_id, aggregate_type, version, event_type, schema_version, occurred_at,
 			correlation_id, causation_id, payload::text AS payload
@@ -98,13 +103,16 @@ public class PostgresEventStore implements EventStore {
 
 	private void insert(UUID aggregateId, String aggregateType, long version, PendingEvent pending,
 			OffsetDateTime occurredAt) {
+		String json = serializer.toJson(pending.event());
 		try {
 			jdbc.update(INSERT, pending.eventId(), aggregateId, aggregateType, version,
 					pending.event().eventType(), SCHEMA_VERSION, occurredAt, pending.correlationId(),
-					pending.causationId(), serializer.toJson(pending.event()));
+					pending.causationId(), json);
 		} catch (DuplicateKeyException e) {
 			handleDuplicateKeyException(e, aggregateId, version, pending.eventId());
 		}
+		jdbc.update(INSERT_OUTBOX, pending.eventId(), aggregateId, aggregateType, pending.event().eventType(), json,
+				occurredAt);
 	}
 
 	private void handleDuplicateKeyException(DuplicateKeyException e, UUID aggregateId, long version, UUID eventId) {
