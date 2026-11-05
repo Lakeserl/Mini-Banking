@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ContextConfiguration;
 
-@SpringBootTest
+@SpringBootTest(properties = "outbox.relay.enabled=false")
 @ContextConfiguration(initializers = PostgresContainerInitializer.class)
 class MiniBankingApplicationTests {
 
