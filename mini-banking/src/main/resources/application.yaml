@@ -31,3 +31,9 @@ transfer:
     max-contention-retries: 12
     contention-backoff-min-ms: 5
     contention-backoff-max-ms: 25
+  recovery:
+    enabled: true
+    poll-interval-ms: 10000
+    stuck-threshold-seconds: 30
+    max-retries: 3
+    batch-size: 50

@@ -39,6 +39,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 @SpringBootTest(properties = {
 		"outbox.relay.enabled=false",
+		"transfer.recovery.enabled=false",
 		"security.jwt.secret=" + WalletApiIntegrationTest.TEST_JWT_SECRET })
 @AutoConfigureMockMvc
 @ContextConfiguration(initializers = PostgresContainerInitializer.class)
