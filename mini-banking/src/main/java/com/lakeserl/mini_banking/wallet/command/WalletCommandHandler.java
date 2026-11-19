@@ -5,6 +5,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import com.lakeserl.mini_banking.shared.domain.AccountType;
@@ -30,8 +32,9 @@ import com.lakeserl.mini_banking.wallet.infrastructure.WalletRepository;
  *   <li>Credit and debit are idempotent per (transactionId, wallet): retrying with the same parameters
  *       returns {@link ApplyResult#ALREADY_APPLIED}, while retrying with conflicting parameters throws
  *       {@link ConflictingTransactionException} (ADR-010).</li>
- *   <li>Retries up to {@value #MAX_RETRIES} times on optimistic concurrency conflicts so that a new,
- *       distinct transaction reads the correct up-to-date balance after the conflict.</li>
+ *   <li>Retries up to {@code wallet.command.max-optimistic-retries} (default {@value #MAX_RETRIES})
+ *       times on optimistic concurrency conflicts so that a new, distinct transaction reads the
+ *       correct up-to-date balance after the conflict.</li>
  * </ul>
  *
  * <p><b>Scope note:</b> The {@code transactionId} used here provides event-level idempotency only.
@@ -50,10 +53,22 @@ public class WalletCommandHandler {
 
 	private final WalletRepository repository;
 	private final EventStore eventStore;
+	private final int maxOptimisticRetries;
 
 	public WalletCommandHandler(WalletRepository repository, EventStore eventStore) {
+		this(repository, eventStore, MAX_RETRIES);
+	}
+
+	@Autowired
+	public WalletCommandHandler(WalletRepository repository, EventStore eventStore,
+			@Value("${wallet.command.max-optimistic-retries:3}") int maxOptimisticRetries) {
 		this.repository = Objects.requireNonNull(repository, "repository must not be null");
 		this.eventStore = Objects.requireNonNull(eventStore, "eventStore must not be null");
+		if (maxOptimisticRetries < 0) {
+			throw new IllegalArgumentException(
+					"wallet.command.max-optimistic-retries must be >= 0, got " + maxOptimisticRetries);
+		}
+		this.maxOptimisticRetries = maxOptimisticRetries;
 	}
 
 	public UUID openWallet(UUID ownerId, Currency currency) {
@@ -83,6 +98,19 @@ public class WalletCommandHandler {
 				wallet -> wallet.credit(transactionId, amount, counterpartAccountId, counterpartType));
 	}
 
+	public ApplyResult creditCompensation(UUID walletId, UUID transactionId, Money amount, String counterpartAccountId,
+			AccountType counterpartType) {
+		Objects.requireNonNull(walletId, "walletId must not be null");
+		Objects.requireNonNull(transactionId, "transactionId must not be null");
+		Objects.requireNonNull(amount, "amount must not be null");
+		Objects.requireNonNull(counterpartAccountId, "counterpartAccountId must not be null");
+		Objects.requireNonNull(counterpartType, "counterpartType must not be null");
+		DomainEvent expectedEvent = new WalletCredited(walletId, amount, transactionId, counterpartAccountId,
+				counterpartType);
+		return apply(walletId, Wallet.creditEventId(transactionId, walletId), expectedEvent,
+				wallet -> wallet.creditCompensation(transactionId, amount, counterpartAccountId, counterpartType));
+	}
+
 	public ApplyResult debit(UUID walletId, UUID transactionId, Money amount, String counterpartAccountId,
 			AccountType counterpartType) {
 		Objects.requireNonNull(walletId, "walletId must not be null");
@@ -109,7 +137,7 @@ public class WalletCommandHandler {
 				repository.save(wallet);
 				return;
 			} catch (OptimisticConcurrencyException e) {
-				if (retryCount >= MAX_RETRIES) {
+				if (retryCount >= maxOptimisticRetries) {
 					throw e;
 				}
 			}
@@ -135,7 +163,7 @@ public class WalletCommandHandler {
 				verifySameEvent(stored, expectedEvent);
 				return ApplyResult.ALREADY_APPLIED;
 			} catch (OptimisticConcurrencyException e) {
-				if (retryCount >= MAX_RETRIES) {
+				if (retryCount >= maxOptimisticRetries) {
 					throw e;
 				}
 				// Loop: reload from fresh state on next iteration.

@@ -138,6 +138,22 @@ public final class Wallet extends AggregateRoot {
 				transactionId, null);
 	}
 
+	/**
+	 * Refunds a previously debited movement during saga compensation. Allowed even if the wallet was
+	 * locked after the original debit so in-flight funds are not stranded.
+	 */
+	public void creditCompensation(UUID transactionId, Money amount, String counterpartAccountId,
+			AccountType counterpartType) {
+		Objects.requireNonNull(transactionId, "transactionId must not be null");
+		Objects.requireNonNull(amount, "amount must not be null");
+		Objects.requireNonNull(counterpartAccountId, "counterpartAccountId must not be null");
+		Objects.requireNonNull(counterpartType, "counterpartType must not be null");
+		requireValidAmount(amount);
+		raise(creditEventId(transactionId, walletId),
+				new WalletCredited(walletId, amount, transactionId, counterpartAccountId, counterpartType),
+				transactionId, null);
+	}
+
 	public void debit(UUID transactionId, Money amount, String counterpartAccountId, AccountType counterpartType) {
 		Objects.requireNonNull(transactionId, "transactionId must not be null");
 		Objects.requireNonNull(amount, "amount must not be null");
@@ -166,6 +182,10 @@ public final class Wallet extends AggregateRoot {
 		if (status == WalletStatus.LOCKED) {
 			throw new WalletLockedException("Wallet " + walletId + " is locked");
 		}
+		requireValidAmount(amount);
+	}
+
+	private void requireValidAmount(Money amount) {
 		balance.compareTo(amount); // throws CurrencyMismatchException
 		if (!amount.isPositive()) {
 			throw new InvalidAmountException("Amount must be greater than zero but was " + amount.amount());

@@ -21,3 +21,7 @@ outbox:
     enabled: true
     poll-interval-ms: 200
     batch-size: 100
+
+wallet:
+  command:
+    max-optimistic-retries: 3

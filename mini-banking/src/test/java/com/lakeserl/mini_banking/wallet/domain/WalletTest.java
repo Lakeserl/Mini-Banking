@@ -108,6 +108,62 @@ class WalletTest {
 	}
 
 	@Test
+	void creditCompensationSucceedsOnLockedWalletEmitsDeterministicEventIdAndReplaysCleanly() {
+		Wallet wallet = newWallet();
+		credit(wallet, 100);
+		wallet.lock("suspicious activity");
+		UUID tx = UUID.randomUUID();
+
+		wallet.creditCompensation(tx, Money.vnd(50), "TRANSFER_CLEARING", AccountType.CLEARING);
+
+		assertThat(wallet.balance()).isEqualTo(Money.vnd(150));
+		assertThat(wallet.status()).isEqualTo(WalletStatus.LOCKED);
+		var compensationEvent = wallet.uncommittedEvents().get(wallet.uncommittedEvents().size() - 1);
+		assertThat(compensationEvent.eventId()).isEqualTo(Wallet.creditEventId(tx, walletId));
+		assertThat(compensationEvent.event())
+				.isEqualTo(new WalletCredited(walletId, Money.vnd(50), tx, "TRANSFER_CLEARING", AccountType.CLEARING));
+
+		Wallet replayed = Wallet.fromHistory(wallet.uncommittedEvents().stream().map(p -> p.event()).toList());
+		assertThat(replayed.balance()).isEqualTo(Money.vnd(150));
+		assertThat(replayed.status()).isEqualTo(WalletStatus.LOCKED);
+		assertThat(replayed.committedVersion()).isEqualTo(wallet.version());
+		assertThat(replayed.uncommittedEvents()).isEmpty();
+
+		assertThatThrownBy(() -> credit(wallet, 25)).isInstanceOf(WalletLockedException.class);
+	}
+
+	@Test
+	void creditCompensationAlsoSucceedsOnActiveWallet() {
+		Wallet wallet = newWallet();
+		UUID tx = UUID.randomUUID();
+
+		wallet.creditCompensation(tx, Money.vnd(75), "TRANSFER_CLEARING", AccountType.CLEARING);
+
+		assertThat(wallet.balance()).isEqualTo(Money.vnd(75));
+		assertThat(wallet.status()).isEqualTo(WalletStatus.ACTIVE);
+		assertThat(wallet.uncommittedEvents().get(1).eventId()).isEqualTo(Wallet.creditEventId(tx, walletId));
+	}
+
+	@Test
+	void creditCompensationRejectsNonPositiveAmountCurrencyMismatchAndOverflow() {
+		Wallet wallet = newWallet();
+		wallet.lock("compliance hold");
+
+		assertThatThrownBy(() -> wallet.creditCompensation(UUID.randomUUID(), Money.vnd(0), "TRANSFER_CLEARING",
+				AccountType.CLEARING)).isInstanceOf(InvalidAmountException.class);
+		assertThatThrownBy(() -> wallet.creditCompensation(UUID.randomUUID(), Money.vnd(-10), "TRANSFER_CLEARING",
+				AccountType.CLEARING)).isInstanceOf(InvalidAmountException.class);
+		assertThatThrownBy(() -> wallet.creditCompensation(UUID.randomUUID(), new Money(10, Currency.USD),
+				"TRANSFER_CLEARING", AccountType.CLEARING)).isInstanceOf(CurrencyMismatchException.class);
+
+		wallet.creditCompensation(UUID.randomUUID(), Money.vnd(Long.MAX_VALUE), "TRANSFER_CLEARING",
+				AccountType.CLEARING);
+		assertThatThrownBy(() -> wallet.creditCompensation(UUID.randomUUID(), Money.vnd(1), "TRANSFER_CLEARING",
+				AccountType.CLEARING)).isInstanceOf(ArithmeticException.class);
+		assertThat(wallet.balance()).isEqualTo(Money.vnd(Long.MAX_VALUE));
+	}
+
+	@Test
 	void lockingAnAlreadyLockedWalletDoesNotRaiseNewEvents() {
 		Wallet wallet = newWallet();
 		wallet.lock("first");
@@ -222,6 +278,11 @@ class WalletTest {
 		assertThatThrownBy(() -> wallet.credit(tx, null, "X", AccountType.SETTLEMENT)).isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> wallet.credit(tx, amount, null, AccountType.SETTLEMENT)).isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> wallet.credit(tx, amount, "X", null)).isInstanceOf(NullPointerException.class);
+
+		assertThatThrownBy(() -> wallet.creditCompensation(null, amount, "X", AccountType.CLEARING)).isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> wallet.creditCompensation(tx, null, "X", AccountType.CLEARING)).isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> wallet.creditCompensation(tx, amount, null, AccountType.CLEARING)).isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> wallet.creditCompensation(tx, amount, "X", null)).isInstanceOf(NullPointerException.class);
 
 		assertThatThrownBy(() -> wallet.debit(null, amount, "X", AccountType.CLEARING)).isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> wallet.lock(null)).isInstanceOf(NullPointerException.class);
