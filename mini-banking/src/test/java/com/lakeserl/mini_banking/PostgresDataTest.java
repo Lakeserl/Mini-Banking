@@ -45,6 +45,8 @@ import com.lakeserl.mini_banking.shared.eventsourcing.PostgresSnapshotStore;
 		com.lakeserl.mini_banking.withdrawal.infrastructure.WithdrawalEventTypes.class,
 		com.lakeserl.mini_banking.withdrawal.infrastructure.WithdrawalRepository.class,
 		com.lakeserl.mini_banking.withdrawal.command.WithdrawalCommandHandler.class,
+		com.lakeserl.mini_banking.transfer.infrastructure.TransferEventTypes.class,
+		com.lakeserl.mini_banking.transfer.infrastructure.TransferRepository.class,
 		com.lakeserl.mini_banking.mockbank.InMemoryMockBankGateway.class })
 public @interface PostgresDataTest {
 }
