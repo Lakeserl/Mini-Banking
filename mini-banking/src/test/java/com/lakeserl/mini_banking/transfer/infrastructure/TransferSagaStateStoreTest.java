@@ -30,6 +30,7 @@ import com.lakeserl.mini_banking.shared.domain.Money;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
+import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.StuckSaga;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.TransferSagaSummary;
@@ -181,8 +182,12 @@ class TransferSagaStateStoreTest {
 
 		Boolean first = tx.execute(status -> store.insertInitiated(
 				transferId, source, dest, Money.vnd(50_000_000L), TransferType.STANDARD, null, 50_000_000L));
-		Boolean retry = tx.execute(status -> store.insertInitiated(
-				transferId, source, dest, Money.vnd(50_000_000L), TransferType.STANDARD, null, 200_000_000L));
+		Boolean retry = tx.execute(status -> {
+			boolean inserted = store.insertInitiated(
+					transferId, source, dest, Money.vnd(50_000_000L), TransferType.STANDARD, null, 50_000_000L);
+			assertThat(store.findById(transferId)).isPresent();
+			return inserted;
+		});
 
 		assertThat(first).isTrue();
 		assertThat(retry).isFalse();
@@ -192,6 +197,14 @@ class TransferSagaStateStoreTest {
 		Boolean refundInserted = tx.execute(status -> store.insertInitiated(
 				refundId, source, dest, Money.vnd(50_000_000L), TransferType.REFUND, transferId, 50_000_000L));
 		assertThat(refundInserted).isTrue();
+
+		Boolean refundRetry = tx.execute(status -> {
+			boolean inserted = store.insertInitiated(
+					refundId, source, dest, Money.vnd(50_000_000L), TransferType.REFUND, transferId, 50_000_000L);
+			assertThat(store.findById(refundId)).isPresent();
+			return inserted;
+		});
+		assertThat(refundRetry).isFalse();
 
 		TransferSagaSummary summary = store.findById(refundId).orElseThrow();
 		assertThat(summary.transferId()).isEqualTo(refundId);
@@ -259,6 +272,9 @@ class TransferSagaStateStoreTest {
 		TransferSagaSummary after = store.findById(transferId).orElseThrow();
 		assertThat(after.retryCount()).isEqualTo(2);
 		assertThat(after.updatedAt()).isEqualTo(persistedBefore);
+
+		assertThatThrownBy(() -> store.incrementRetry(UUID.randomUUID()))
+				.isInstanceOf(TransferNotFoundException.class);
 	}
 
 	@Test

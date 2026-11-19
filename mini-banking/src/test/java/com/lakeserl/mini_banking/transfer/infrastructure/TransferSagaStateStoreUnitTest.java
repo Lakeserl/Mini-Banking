@@ -12,6 +12,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.time.Clock;
@@ -33,12 +34,15 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.Money;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
+import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.StuckSaga;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.TransferSagaSummary;
@@ -59,7 +63,7 @@ class TransferSagaStateStoreUnitTest {
 
 	@SuppressWarnings("unchecked")
 	@Test
-	void insertInitiatedStandardAcquiresAdvisoryLockBeforeSummingAndInserting() {
+	void insertInitiatedStandardAcquiresAdvisoryLockChecksExistsSumsAndInsertsWithOnConflictDoNothing() {
 		UUID transferId = UUID.randomUUID();
 		UUID source = UUID.randomUUID();
 		UUID dest = UUID.randomUUID();
@@ -67,27 +71,37 @@ class TransferSagaStateStoreUnitTest {
 		OffsetDateTime expectedWindowStart = OffsetDateTime.ofInstant(FIXED_NOW.minus(Duration.ofHours(24)),
 				ZoneOffset.UTC);
 
+		when(jdbc.queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId))).thenReturn(false);
 		when(jdbc.queryForObject(anyString(), eq(Long.class), eq(source), eq(expectedWindowStart)))
 				.thenReturn(150_000_000L);
-		when(jdbc.update(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+		ArgumentCaptor<String> insertSqlCaptor = ArgumentCaptor.forClass(String.class);
+		when(jdbc.update(insertSqlCaptor.capture(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
 				.thenReturn(1);
 
 		boolean inserted = store.insertInitiated(transferId, source, dest, Money.vnd(50_000_000L),
 				TransferType.STANDARD, null, 200_000_000L);
 
 		assertThat(inserted).isTrue();
+		assertThat(insertSqlCaptor.getValue()).contains("ON CONFLICT (transfer_id) DO NOTHING");
 		InOrder order = inOrder(jdbc);
 		order.verify(jdbc).query(
 				eq("SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))"),
 				any(RowMapper.class),
 				eq(source.toString()));
 		order.verify(jdbc).queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId));
+		order.verify(jdbc).queryForObject(
 				contains("COALESCE(SUM(amount), 0)"),
 				eq(Long.class),
 				eq(source),
 				eq(expectedWindowStart));
 		order.verify(jdbc).update(
-				contains("INSERT INTO transfer_saga_state"),
+				contains("ON CONFLICT (transfer_id) DO NOTHING"),
 				eq(transferId),
 				eq(source),
 				eq(dest),
@@ -102,8 +116,33 @@ class TransferSagaStateStoreUnitTest {
 
 	@SuppressWarnings("unchecked")
 	@Test
+	void insertInitiatedStandardReturnsFalseEarlyWhenTransferAlreadyExistsEvenAtDailyLimit() {
+		UUID transferId = UUID.randomUUID();
+		UUID source = UUID.randomUUID();
+		when(jdbc.queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId))).thenReturn(true);
+		when(jdbc.queryForObject(anyString(), eq(Long.class), eq(source), any(OffsetDateTime.class)))
+				.thenReturn(50_000_000L);
+
+		boolean inserted = store.insertInitiated(transferId, source, UUID.randomUUID(),
+				Money.vnd(50_000_000L), TransferType.STANDARD, null, 50_000_000L);
+
+		assertThat(inserted).isFalse();
+		verify(jdbc).query(
+				eq("SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))"),
+				any(RowMapper.class),
+				eq(source.toString()));
+		verify(jdbc, never()).queryForObject(anyString(), eq(Long.class), any(), any());
+		verify(jdbc, never()).update(anyString(), any(Object[].class));
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
 	void insertInitiatedStandardRejectsWhenDailyLimitExceededWithoutInserting() {
 		UUID source = UUID.randomUUID();
+		when(jdbc.queryForObject(anyString(), eq(Boolean.class), any(UUID.class))).thenReturn(false);
 		when(jdbc.queryForObject(anyString(), eq(Long.class), eq(source), any(OffsetDateTime.class)))
 				.thenReturn(150_000_001L);
 
@@ -119,6 +158,7 @@ class TransferSagaStateStoreUnitTest {
 	@Test
 	void insertInitiatedStandardProtectsAgainstLongOverflowWithMathAddExact() {
 		UUID source = UUID.randomUUID();
+		when(jdbc.queryForObject(anyString(), eq(Boolean.class), any(UUID.class))).thenReturn(false);
 		when(jdbc.queryForObject(anyString(), eq(Long.class), eq(source), any(OffsetDateTime.class)))
 				.thenReturn(Long.MAX_VALUE - 5L);
 
@@ -148,7 +188,7 @@ class TransferSagaStateStoreUnitTest {
 		verify(jdbc, never()).query(anyString(), any(RowMapper.class), any());
 		verify(jdbc, never()).queryForObject(anyString(), eq(Long.class), any(), any());
 		verify(jdbc).update(
-				contains("INSERT INTO transfer_saga_state"),
+				contains("ON CONFLICT (transfer_id) DO NOTHING"),
 				eq(transferId),
 				eq(source),
 				eq(dest),
@@ -175,11 +215,11 @@ class TransferSagaStateStoreUnitTest {
 	}
 
 	@Test
-	void insertInitiatedReturnsFalseOnPrimaryKeyConstraintViolation() {
-		DuplicateKeyException dup = duplicateKeyForConstraint("transfer_saga_state_pkey");
+	void insertInitiatedReturnsFalseWhenOnConflictDoNothingUpdatesZeroRows() {
+		when(jdbc.queryForObject(anyString(), eq(Boolean.class), any(UUID.class))).thenReturn(false);
 		when(jdbc.queryForObject(anyString(), eq(Long.class), any(), any())).thenReturn(0L);
 		when(jdbc.update(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
-				.thenThrow(dup);
+				.thenReturn(0);
 
 		boolean inserted = store.insertInitiated(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
 				Money.vnd(10_000L), TransferType.STANDARD, null, 200_000_000L);
@@ -190,6 +230,7 @@ class TransferSagaStateStoreUnitTest {
 	@Test
 	void insertInitiatedRethrowsUnrecognizedDuplicateKeyException() {
 		DuplicateKeyException dup = duplicateKeyForConstraint("some_other_constraint");
+		when(jdbc.queryForObject(anyString(), eq(Boolean.class), any(UUID.class))).thenReturn(false);
 		when(jdbc.queryForObject(anyString(), eq(Long.class), any(), any())).thenReturn(0L);
 		when(jdbc.update(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
 				.thenThrow(dup);
@@ -197,6 +238,20 @@ class TransferSagaStateStoreUnitTest {
 		assertThatThrownBy(() -> store.insertInitiated(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
 				Money.vnd(10_000L), TransferType.STANDARD, null, 200_000_000L))
 				.isSameAs(dup);
+	}
+
+	@Test
+	void insertInitiatedRejectsNonVndCurrencyAndDeclaresMandatoryTransactionPropagation() throws Exception {
+		assertThatThrownBy(() -> store.insertInitiated(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+				new Money(100L, Currency.USD), TransferType.STANDARD, null, 200_000_000L))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("VND");
+
+		Method method = TransferSagaStateStore.class.getMethod("insertInitiated",
+				UUID.class, UUID.class, UUID.class, Money.class, TransferType.class, UUID.class, long.class);
+		Transactional txAnnotation = method.getAnnotation(Transactional.class);
+		assertThat(txAnnotation).isNotNull();
+		assertThat(txAnnotation.propagation()).isEqualTo(Propagation.MANDATORY);
 	}
 
 	@Test
@@ -214,11 +269,13 @@ class TransferSagaStateStoreUnitTest {
 				eq(transferId));
 	}
 
+	@SuppressWarnings("unchecked")
 	@Test
-	void incrementRetryReturnsIncrementedCountWithoutMutatingUpdatedAt() {
+	void incrementRetryReturnsIncrementedCountWithoutMutatingUpdatedAtAndThrowsWhenMissing() throws Exception {
 		UUID transferId = UUID.randomUUID();
 		ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-		when(jdbc.queryForObject(sqlCaptor.capture(), eq(Integer.class), eq(transferId))).thenReturn(3);
+		ArgumentCaptor<RowMapper<Integer>> mapperCaptor = ArgumentCaptor.forClass(RowMapper.class);
+		when(jdbc.query(sqlCaptor.capture(), mapperCaptor.capture(), eq(transferId))).thenReturn(List.of(3));
 
 		int retryCount = store.incrementRetry(transferId);
 
@@ -227,6 +284,15 @@ class TransferSagaStateStoreUnitTest {
 		assertThat(sql).contains("retry_count = retry_count + 1");
 		assertThat(sql).contains("RETURNING retry_count");
 		assertThat(sql).doesNotContain("updated_at");
+
+		ResultSet rs = mock(ResultSet.class);
+		when(rs.getInt("retry_count")).thenReturn(3);
+		assertThat(mapperCaptor.getValue().mapRow(rs, 0)).isEqualTo(3);
+
+		UUID missingId = UUID.randomUUID();
+		when(jdbc.query(anyString(), any(RowMapper.class), eq(missingId))).thenReturn(List.of());
+		assertThatThrownBy(() -> store.incrementRetry(missingId))
+				.isInstanceOf(TransferNotFoundException.class);
 	}
 
 	@SuppressWarnings("unchecked")

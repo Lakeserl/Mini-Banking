@@ -15,6 +15,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.Money;
@@ -47,6 +49,8 @@ public class TransferSagaStateStore {
 
 	private static final String ADVISORY_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))";
 
+	private static final String EXISTS_BY_ID = "SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)";
+
 	private static final String SUM_OUTGOING_24H = """
 			SELECT COALESCE(SUM(amount), 0)
 			FROM transfer_saga_state
@@ -62,6 +66,7 @@ public class TransferSagaStateStore {
 			    transfer_type, original_transfer_id, status, retry_count, failure_reason,
 			    created_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+			ON CONFLICT (transfer_id) DO NOTHING
 			""";
 
 	private static final String UPDATE_STATUS = """
@@ -127,6 +132,7 @@ public class TransferSagaStateStore {
 	 *
 	 * @return {@code true} if inserted, {@code false} if {@code transferId} already existed (idempotent retry)
 	 */
+	@Transactional(propagation = Propagation.MANDATORY)
 	public boolean insertInitiated(UUID transferId, UUID sourceWalletId, UUID destinationWalletId, Money amount,
 			TransferType type, UUID originalTransferId, long dailyLimitVnd) {
 		Objects.requireNonNull(transferId, "transferId must not be null");
@@ -134,6 +140,9 @@ public class TransferSagaStateStore {
 		Objects.requireNonNull(destinationWalletId, "destinationWalletId must not be null");
 		Objects.requireNonNull(amount, "amount must not be null");
 		Objects.requireNonNull(type, "type must not be null");
+		if (amount.currency() != Currency.VND) {
+			throw new IllegalArgumentException("amount currency must be VND");
+		}
 		if (!amount.isPositive()) {
 			throw new IllegalArgumentException("amount must be positive");
 		}
@@ -143,16 +152,19 @@ public class TransferSagaStateStore {
 
 		if (type == TransferType.STANDARD) {
 			jdbc.query(ADVISORY_LOCK, (rs, rowNum) -> null, sourceWalletId.toString());
+			if (Boolean.TRUE.equals(jdbc.queryForObject(EXISTS_BY_ID, Boolean.class, transferId))) {
+				return false;
+			}
 			long spent24h = sumOutgoingLast24Hours(sourceWalletId);
 			enforceDailyLimit(sourceWalletId, spent24h, amount.amount(), dailyLimitVnd);
 		}
 
 		OffsetDateTime now = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
 		try {
-			jdbc.update(INSERT_INITIATED, transferId, sourceWalletId, destinationWalletId, amount.amount(),
+			int rows = jdbc.update(INSERT_INITIATED, transferId, sourceWalletId, destinationWalletId, amount.amount(),
 					amount.currency().name(), type.name(), originalTransferId, TransferStatus.INITIATED.name(),
 					now, now);
-			return true;
+			return rows == 1;
 		} catch (DuplicateKeyException e) {
 			return handleDuplicateKeyException(e, originalTransferId);
 		}
@@ -179,11 +191,10 @@ public class TransferSagaStateStore {
 
 	public int incrementRetry(UUID transferId) {
 		Objects.requireNonNull(transferId, "transferId must not be null");
-		Integer retryCount = jdbc.queryForObject(INCREMENT_RETRY, Integer.class, transferId);
-		if (retryCount == null) {
-			throw new TransferNotFoundException(transferId);
-		}
-		return retryCount;
+		return jdbc.query(INCREMENT_RETRY, (rs, i) -> rs.getInt("retry_count"), transferId)
+				.stream()
+				.findFirst()
+				.orElseThrow(() -> new TransferNotFoundException(transferId));
 	}
 
 	public long sumOutgoingLast24Hours(UUID sourceWalletId) {
