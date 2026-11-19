@@ -4,7 +4,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ContextConfiguration;
 
-@SpringBootTest(properties = "outbox.relay.enabled=false")
+@SpringBootTest(properties = {
+		"outbox.relay.enabled=false",
+		"security.jwt.secret=test-only-jwt-secret-key-at-least-32-bytes-long" })
 @ContextConfiguration(initializers = PostgresContainerInitializer.class)
 class MiniBankingApplicationTests {
 

@@ -96,6 +96,26 @@ public class WalletCommandHandler {
 				wallet -> wallet.debit(transactionId, amount, counterpartAccountId, counterpartType));
 	}
 
+	public void lockWallet(UUID walletId, String reason) {
+		Objects.requireNonNull(walletId, "walletId must not be null");
+		Objects.requireNonNull(reason, "reason must not be null");
+		if (reason.isBlank()) {
+			throw new IllegalArgumentException("reason must not be blank");
+		}
+		for (int retryCount = 0;; retryCount++) {
+			Wallet wallet = repository.load(walletId).orElseThrow(() -> new WalletNotFoundException(walletId));
+			wallet.lock(reason);
+			try {
+				repository.save(wallet);
+				return;
+			} catch (OptimisticConcurrencyException e) {
+				if (retryCount >= MAX_RETRIES) {
+					throw e;
+				}
+			}
+		}
+	}
+
 	private ApplyResult apply(UUID walletId, UUID eventId, DomainEvent expectedEvent, Consumer<Wallet> action) {
 		for (int retryCount = 0;; retryCount++) {
 			Optional<StoredEvent> existing = eventStore.findEvent(eventId);
