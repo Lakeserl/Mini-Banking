@@ -11,3 +11,5 @@ graphify-out/*
 mini-banking/AGENTS.md
 mini-banking/graphify-out/*
 .gitignore
+/.agents/*
+AGENTS.md
