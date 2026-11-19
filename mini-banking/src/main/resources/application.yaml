@@ -25,3 +25,9 @@ outbox:
 wallet:
   command:
     max-optimistic-retries: 3
+
+transfer:
+  orchestrator:
+    max-contention-retries: 12
+    contention-backoff-min-ms: 5
+    contention-backoff-max-ms: 25
