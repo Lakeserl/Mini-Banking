@@ -11,6 +11,9 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import com.lakeserl.mini_banking.shared.domain.CurrencyMismatchException;
 import com.lakeserl.mini_banking.shared.eventsourcing.OptimisticConcurrencyException;
+import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
+import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
+import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.ConflictingTransactionException;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InsufficientFundsException;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException;
@@ -28,6 +31,24 @@ public class ApiExceptionHandler {
 	ResponseEntity<ErrorResponse> handleNotFound(WalletNotFoundException ex) {
 		return ResponseEntity.status(HttpStatus.NOT_FOUND)
 				.body(new ErrorResponse("WALLET_NOT_FOUND", ex.getMessage()));
+	}
+
+	@ExceptionHandler(TransferNotFoundException.class)
+	ResponseEntity<ErrorResponse> handleTransferNotFound(TransferNotFoundException ex) {
+		return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(new ErrorResponse("TRANSFER_NOT_FOUND", ex.getMessage()));
+	}
+
+	@ExceptionHandler(TransferPolicyViolationException.class)
+	ResponseEntity<ErrorResponse> handleTransferPolicyViolation(TransferPolicyViolationException ex) {
+		return ResponseEntity.status(422)
+				.body(new ErrorResponse("TRANSFER_POLICY_VIOLATION", ex.getMessage()));
+	}
+
+	@ExceptionHandler(InvalidTransferStateException.class)
+	ResponseEntity<ErrorResponse> handleInvalidTransferState(InvalidTransferStateException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(new ErrorResponse("INVALID_TRANSFER_STATE", ex.getMessage()));
 	}
 
 	@ExceptionHandler(WalletAlreadyExistsException.class)

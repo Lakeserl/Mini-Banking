@@ -34,7 +34,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
 	public static final String HEADER = "Idempotency-Key";
 	private static final int MAX_KEY_LENGTH = 100;
-	private static final Pattern IDEMPOTENT_PATH = Pattern.compile("^/api/wallets/[^/]+/(deposit|withdraw)$");
+	private static final Pattern IDEMPOTENT_PATH = Pattern
+			.compile("^/api/(wallets/[^/]+/(deposit|withdraw)|transfers(/[^/]+/refund)?)$");
 
 	private final IdempotencyService idempotencyService;
 
