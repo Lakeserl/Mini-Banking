@@ -2,6 +2,8 @@ package com.lakeserl.mini_banking.shared.outbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -28,9 +30,10 @@ class OutboxRelayTest {
 		jdbc.update("DELETE FROM outbox");
 	}
 
-	/** Records published ids; fails the first attempt for {@code failOnId} when set. */
+	/** Records published messages and ids; fails the first attempt for {@code failOnId} when set. */
 	static class FakePublisher implements OutboxPublisher {
 		final List<Long> published = new ArrayList<>();
+		final List<OutboxMessage> messages = new ArrayList<>();
 		Long failOnceOnId;
 
 		@Override
@@ -40,6 +43,7 @@ class OutboxRelayTest {
 				throw new OutboxPublishException("boom", null);
 			}
 			published.add(message.id());
+			messages.add(message);
 		}
 	}
 
@@ -59,21 +63,32 @@ class OutboxRelayTest {
 		return jdbc.queryForObject("SELECT count(*) FROM outbox WHERE published_at IS NULL", Integer.class);
 	}
 
+	private List<Instant> persistedCreatedAtInOrder() {
+		return jdbc.query("SELECT created_at FROM outbox ORDER BY id",
+				(rs, i) -> rs.getObject("created_at", OffsetDateTime.class).toInstant());
+	}
+
 	@Test
 	void relayOnce_publishesInIdOrderAndMarksPublished() {
 		List<Long> ids = insertRows(3);
+		List<Instant> expectedOccurredAt = persistedCreatedAtInOrder();
 		FakePublisher publisher = new FakePublisher();
 		OutboxRelay relay = new OutboxRelay(jdbc, tx, publisher, 100);
 
 		assertThat(relay.relayOnce()).isEqualTo(3);
 
 		assertThat(publisher.published).containsExactlyElementsOf(ids);
+		assertThat(publisher.messages)
+				.extracting(OutboxMessage::occurredAt)
+				.doesNotContainNull()
+				.containsExactlyElementsOf(expectedOccurredAt);
 		assertThat(unpublishedCount()).isZero();
 	}
 
 	@Test
 	void relayOnce_stopsAtFirstFailureAndRetriesSameRowNext() {
 		List<Long> ids = insertRows(3);
+		List<Instant> expectedOccurredAt = persistedCreatedAtInOrder();
 		FakePublisher publisher = new FakePublisher();
 		publisher.failOnceOnId = ids.get(1);
 		OutboxRelay relay = new OutboxRelay(jdbc, tx, publisher, 100);
@@ -84,6 +99,10 @@ class OutboxRelayTest {
 
 		assertThat(relay.relayOnce()).isEqualTo(2);
 		assertThat(publisher.published).containsExactlyElementsOf(ids);
+		assertThat(publisher.messages)
+				.extracting(OutboxMessage::occurredAt)
+				.doesNotContainNull()
+				.containsExactlyElementsOf(expectedOccurredAt);
 		assertThat(unpublishedCount()).isZero();
 	}
 
