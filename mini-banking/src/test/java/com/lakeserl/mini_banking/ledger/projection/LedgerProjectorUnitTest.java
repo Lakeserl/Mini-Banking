@@ -65,6 +65,7 @@ class LedgerProjectorUnitTest {
 	@Test
 	void constructorValidatesArgumentsAndDefaultsConsumerGroup() {
 		assertThat(LedgerProjector.DEFAULT_CONSUMER_GROUP).isEqualTo("ledger-projector");
+		assertThat(new LedgerProjector(jdbc, tx, "a".repeat(50))).isNotNull();
 		assertThatThrownBy(() -> new LedgerProjector(null, tx))
 				.isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> new LedgerProjector(jdbc, null))
@@ -73,6 +74,9 @@ class LedgerProjectorUnitTest {
 				.isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> new LedgerProjector(jdbc, tx, "   "))
 				.isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> new LedgerProjector(jdbc, tx, "a".repeat(51)))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("50");
 		assertThatThrownBy(() -> new LedgerQueryRepository(null))
 				.isInstanceOf(NullPointerException.class);
 	}
@@ -268,7 +272,7 @@ class LedgerProjectorUnitTest {
 	}
 
 	@Test
-	void projectUnknownDomainEventThrowsAndRollsBackTransaction() {
+	void projectUnknownDomainEventThrowsBeforeOpeningTransaction() {
 		record UnsupportedEvent(UUID id) implements DomainEvent {
 		}
 		UUID eventId = UUID.randomUUID();
@@ -279,12 +283,12 @@ class LedgerProjectorUnitTest {
 				.hasMessageContaining("UnsupportedEvent");
 
 		assertThat(txManager.commitCount).isZero();
-		assertThat(txManager.rollbackCount).isEqualTo(1);
+		assertThat(txManager.rollbackCount).isZero();
 		verifyNoInteractions(jdbc);
 	}
 
 	@Test
-	void projectRejectsNonPositiveOrNonVndMonetaryEventsAndRollsBack() {
+	void projectRejectsNonPositiveOrNonVndMonetaryEventsBeforeOpeningTransaction() {
 		UUID walletId = UUID.randomUUID();
 		UUID txId = UUID.randomUUID();
 
@@ -310,7 +314,7 @@ class LedgerProjectorUnitTest {
 				.isInstanceOf(IllegalArgumentException.class);
 
 		assertThat(txManager.commitCount).isZero();
-		assertThat(txManager.rollbackCount).isEqualTo(4);
+		assertThat(txManager.rollbackCount).isZero();
 		verifyNoInteractions(jdbc);
 	}
 

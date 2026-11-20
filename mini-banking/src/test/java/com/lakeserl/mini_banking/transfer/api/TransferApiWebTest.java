@@ -294,15 +294,31 @@ class TransferApiWebTest {
 				.andExpect(jsonPath("$.status").value("COMPLETED"))
 				.andExpect(jsonPath("$.type").value("REFUND"));
 
-		// Admin -> 200 OK
+		// Admin -> 200 OK (short-circuits before loading destination wallet)
+		UUID adminOnlyOriginalId = UUID.randomUUID();
+		UUID missingDestWalletId = UUID.randomUUID();
+		Transfer adminOnlyOriginal = Transfer.initiate(adminOnlyOriginalId, sourceId, missingDestWalletId,
+				Money.vnd(100_000), TransferType.STANDARD, null);
+		adminOnlyOriginal.markDebitCompleted();
+		adminOnlyOriginal.markCreditAndComplete();
+		when(orchestrator.findTransfer(adminOnlyOriginalId)).thenReturn(Optional.of(adminOnlyOriginal));
 		when(idempotencyService.begin(eq(adminId), eq("rf-admin"), anyString())).thenReturn(new Decision.Acquired());
-		mockMvc.perform(post("/api/transfers/{id}/refund", originalId)
+		when(orchestrator.refund(any(), eq(adminOnlyOriginalId))).thenAnswer(inv -> {
+			UUID refundId = inv.getArgument(0);
+			Transfer rf = Transfer.initiate(refundId, missingDestWalletId, sourceId, Money.vnd(100_000),
+					TransferType.REFUND, adminOnlyOriginalId);
+			rf.markDebitCompleted();
+			rf.markCreditAndComplete();
+			return rf;
+		});
+		mockMvc.perform(post("/api/transfers/{id}/refund", adminOnlyOriginalId)
 						.with(jwt().jwt(j -> j.subject(adminId.toString()).claim("roles", List.of("ADMIN")))
 								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
 						.header("Idempotency-Key", "rf-admin"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED"))
 				.andExpect(jsonPath("$.type").value("REFUND"));
+		verify(walletRepository, never()).load(missingDestWalletId);
 	}
 
 	@Test

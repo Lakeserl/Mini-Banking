@@ -171,13 +171,17 @@ class TransferSagaStateStoreUnitTest {
 
 	@SuppressWarnings("unchecked")
 	@Test
-	void insertInitiatedRefundIsExemptFromDailyLimitAndSkipsAdvisoryLock() {
+	void insertInitiatedRefundIsExemptFromDailyLimitSkipsAdvisoryLockAndChecksExistsBeforeInsert() {
 		UUID transferId = UUID.randomUUID();
 		UUID source = UUID.randomUUID();
 		UUID dest = UUID.randomUUID();
 		UUID originalTransferId = UUID.randomUUID();
 		OffsetDateTime expectedNow = OffsetDateTime.ofInstant(FIXED_NOW, ZoneOffset.UTC);
 
+		when(jdbc.queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId))).thenReturn(false);
 		when(jdbc.update(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
 				.thenReturn(1);
 
@@ -187,7 +191,12 @@ class TransferSagaStateStoreUnitTest {
 		assertThat(inserted).isTrue();
 		verify(jdbc, never()).query(anyString(), any(RowMapper.class), any());
 		verify(jdbc, never()).queryForObject(anyString(), eq(Long.class), any(), any());
-		verify(jdbc).update(
+		InOrder order = inOrder(jdbc);
+		order.verify(jdbc).queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId));
+		order.verify(jdbc).update(
 				contains("ON CONFLICT (transfer_id) DO NOTHING"),
 				eq(transferId),
 				eq(source),
@@ -201,14 +210,37 @@ class TransferSagaStateStoreUnitTest {
 				eq(expectedNow));
 	}
 
+	@SuppressWarnings("unchecked")
+	@Test
+	void insertInitiatedRefundReturnsFalseEarlyWhenTransferAlreadyExistsWithoutCallingInsert() {
+		UUID transferId = UUID.randomUUID();
+		UUID originalTransferId = UUID.randomUUID();
+		when(jdbc.queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId))).thenReturn(true);
+
+		boolean inserted = store.insertInitiated(transferId, UUID.randomUUID(), UUID.randomUUID(),
+				Money.vnd(50_000_000L), TransferType.REFUND, originalTransferId, 0L);
+
+		assertThat(inserted).isFalse();
+		verify(jdbc, never()).query(anyString(), any(RowMapper.class), any());
+		verify(jdbc, never()).update(anyString(), any(Object[].class));
+	}
+
 	@Test
 	void insertInitiatedMapsActiveRefundConstraintToInvalidTransferStateException() {
+		UUID transferId = UUID.randomUUID();
 		UUID originalTransferId = UUID.randomUUID();
 		DuplicateKeyException dup = duplicateKeyForConstraint("uq_transfer_active_refund");
+		when(jdbc.queryForObject(
+				eq("SELECT EXISTS (SELECT 1 FROM transfer_saga_state WHERE transfer_id = ?)"),
+				eq(Boolean.class),
+				eq(transferId))).thenReturn(false);
 		when(jdbc.update(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
 				.thenThrow(dup);
 
-		assertThatThrownBy(() -> store.insertInitiated(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+		assertThatThrownBy(() -> store.insertInitiated(transferId, UUID.randomUUID(), UUID.randomUUID(),
 				Money.vnd(10_000L), TransferType.REFUND, originalTransferId, 200_000_000L))
 				.isInstanceOf(InvalidTransferStateException.class)
 				.hasMessage("Transfer " + originalTransferId + " already has an active or completed refund");

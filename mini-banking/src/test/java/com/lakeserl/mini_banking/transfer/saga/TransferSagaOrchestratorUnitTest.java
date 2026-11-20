@@ -13,7 +13,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -137,9 +141,9 @@ class TransferSagaOrchestratorUnitTest {
 				TransferSagaOrchestrator.TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING));
 
 		// ADR-006: wallet commands ran OUTSIDE Transfer's TransactionTemplate blocks
-		assertThat(eventStore.walletAppendInsideTransferTxCount).isZero();
+		assertThat(eventStore.walletAppendInsideTransferTxCount.get()).isZero();
 		// 3 Transfer state transitions inside tx: INITIATED, DEBITED, COMPLETED
-		assertThat(txManager.commitCount).isEqualTo(3);
+		assertThat(txManager.commitCount.get()).isEqualTo(3);
 	}
 
 	@Test
@@ -472,6 +476,84 @@ class TransferSagaOrchestratorUnitTest {
 	}
 
 	@Test
+	void concurrentTransferAndResumeOnSameTransferId_serializeCleanlyWithoutDoubleDebitOrPayingBothWallets()
+			throws Exception {
+		UUID sourceId = openFundedWallet(1_000_000L);
+		UUID destId = openFundedWallet(100_000L);
+		UUID transferId = UUID.randomUUID();
+
+		CountDownLatch debitCommitted = new CountDownLatch(1);
+		CountDownLatch resumeStarted = new CountDownLatch(1);
+		AtomicBoolean resumeCompleted = new AtomicBoolean(false);
+		AtomicReference<Transfer> transferResultRef = new AtomicReference<>();
+		AtomicReference<Transfer> resumeResultRef = new AtomicReference<>();
+		AtomicReference<Throwable> failureRef = new AtomicReference<>();
+
+		Thread resumeThread = new Thread(() -> {
+			try {
+				if (!debitCommitted.await(5, TimeUnit.SECONDS)) {
+					throw new AssertionError("Timed out waiting for debitCommitted");
+				}
+				resumeStarted.countDown();
+				// Even at maxRetries (3/3), resume must serialize behind transfer() and observe COMPLETED
+				resumeResultRef.set(orchestrator.resume(transferId, 3, 3));
+				resumeCompleted.set(true);
+			} catch (Throwable t) {
+				failureRef.compareAndSet(null, t);
+			}
+		}, "test-resume-thread");
+
+		eventStore.onAfterWalletDebit = () -> {
+			debitCommitted.countDown();
+			try {
+				assertThat(resumeStarted.await(5, TimeUnit.SECONDS)).isTrue();
+				// Wait until dedicated resumeThread parks on the per-transferId striped lock (not terminated)
+				long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+				while (System.nanoTime() < deadline
+						&& resumeThread.getState() != Thread.State.WAITING
+						&& resumeThread.getState() != Thread.State.TERMINATED) {
+					Thread.yield();
+				}
+				assertThat(resumeThread.getState()).isEqualTo(Thread.State.WAITING);
+				assertThat(resumeCompleted.get()).isFalse();
+				assertThat(eventStore.findEvent(Wallet.creditEventId(transferId, destId))).isEmpty();
+			} catch (InterruptedException ie) {
+				Thread.currentThread().interrupt();
+				throw new AssertionError(ie);
+			}
+		};
+
+		Thread transferThread = new Thread(() -> {
+			try {
+				transferResultRef.set(orchestrator.transfer(transferId, sourceId, destId, Money.vnd(300_000L)));
+			} catch (Throwable t) {
+				failureRef.compareAndSet(null, t);
+			}
+		}, "test-transfer-thread");
+
+		resumeThread.start();
+		transferThread.start();
+		transferThread.join(10_000);
+		resumeThread.join(10_000);
+
+		assertThat(failureRef.get()).isNull();
+		assertThat(transferResultRef.get()).isNotNull();
+		assertThat(resumeResultRef.get()).isNotNull();
+		assertThat(transferResultRef.get().status()).isEqualTo(TransferStatus.COMPLETED);
+		assertThat(resumeResultRef.get().status()).isEqualTo(TransferStatus.COMPLETED);
+
+		// Exact balance conservation: no double debit, no double credit, no compensation paying source back
+		assertThat(walletRepository.load(sourceId)).get().extracting(Wallet::balance)
+				.isEqualTo(Money.vnd(700_000L));
+		assertThat(walletRepository.load(destId)).get().extracting(Wallet::balance)
+				.isEqualTo(Money.vnd(400_000L));
+		assertThat(eventStore.findEvent(Wallet.debitEventId(transferId, sourceId))).isPresent();
+		assertThat(eventStore.findEvent(Wallet.creditEventId(transferId, destId))).isPresent();
+		assertThat(eventStore.findEvent(Wallet.creditEventId(transferId, sourceId))).isEmpty();
+		assertThat(eventStore.walletAppendCountForTx(transferId)).isEqualTo(2);
+	}
+
+	@Test
 	void constructorAndSpringPropertyBinding_validatesSeparateOrchestratorContentionConfig() {
 		assertThatThrownBy(() -> new TransferSagaOrchestrator(transferRepository, sagaStateStore, walletRepository,
 				walletHandler, eventStore, txTemplate, -1, 5L, 25L))
@@ -499,87 +581,125 @@ class TransferSagaOrchestratorUnitTest {
 	}
 
 	private final class RecordingTransactionManager implements PlatformTransactionManager {
-		int activeDepth = 0;
-		int commitCount = 0;
+		private final ThreadLocal<Integer> activeDepth = ThreadLocal.withInitial(() -> 0);
+		final AtomicInteger commitCount = new AtomicInteger();
+
+		boolean isActiveOnCurrentThread() {
+			return activeDepth.get() > 0;
+		}
 
 		@Override
 		public TransactionStatus getTransaction(TransactionDefinition definition) {
-			activeDepth++;
+			activeDepth.set(activeDepth.get() + 1);
 			return new SimpleTransactionStatus();
 		}
 
 		@Override
 		public void commit(TransactionStatus status) {
-			activeDepth--;
-			commitCount++;
+			activeDepth.set(activeDepth.get() - 1);
+			commitCount.incrementAndGet();
 		}
 
 		@Override
 		public void rollback(TransactionStatus status) {
-			activeDepth--;
+			activeDepth.set(activeDepth.get() - 1);
 		}
 	}
 
 	private final class InMemoryEventStore implements EventStore {
 		private final List<StoredEvent> events = new ArrayList<>();
-		Runnable onAfterWalletDebit;
-		UUID failWalletAppendsForAggregate;
-		int walletAppendInsideTransferTxCount = 0;
+		volatile Runnable onAfterWalletDebit;
+		volatile UUID failWalletAppendsForAggregate;
+		final AtomicInteger walletAppendInsideTransferTxCount = new AtomicInteger();
+		private final Map<UUID, AtomicInteger> walletAppendsByTx = new HashMap<>();
 
 		@Override
 		public void append(UUID aggregateId, String aggregateType, long expectedVersion, List<PendingEvent> pending) {
-			if ("Wallet".equals(aggregateType) && txManager.activeDepth > 0) {
-				walletAppendInsideTransferTxCount++;
+			if ("Wallet".equals(aggregateType) && txManager.isActiveOnCurrentThread()) {
+				walletAppendInsideTransferTxCount.incrementAndGet();
 			}
 			if ("Wallet".equals(aggregateType) && aggregateId.equals(failWalletAppendsForAggregate)) {
 				throw new OptimisticConcurrencyException("Simulated wallet contention for " + aggregateId);
 			}
-			for (PendingEvent p : pending) {
-				if (contains(p.eventId())) {
-					throw new DuplicateEventException(p.eventId(), null);
+			Runnable hookToRun = null;
+			synchronized (events) {
+				for (PendingEvent p : pending) {
+					if (p.event() instanceof WalletDebited wd) {
+						walletAppendsByTx.computeIfAbsent(wd.transactionId(), k -> new AtomicInteger()).incrementAndGet();
+					} else if (p.event() instanceof WalletCredited wc) {
+						walletAppendsByTx.computeIfAbsent(wc.transactionId(), k -> new AtomicInteger()).incrementAndGet();
+					}
+					if (containsUnlocked(p.eventId())) {
+						throw new DuplicateEventException(p.eventId(), null);
+					}
+				}
+				long currentVersion = latestVersionUnlocked(aggregateId);
+				if (currentVersion != expectedVersion) {
+					throw new OptimisticConcurrencyException(
+							"Expected version " + expectedVersion + " but was " + currentVersion);
+				}
+				long version = expectedVersion;
+				boolean sawWalletDebit = false;
+				for (PendingEvent p : pending) {
+					version++;
+					events.add(new StoredEvent(p.eventId(), aggregateId, aggregateType, version, p.event().eventType(), 1,
+							FIXED_NOW, p.correlationId(), p.causationId(), p.event()));
+					if (p.event() instanceof WalletDebited) {
+						sawWalletDebit = true;
+					}
+				}
+				if (sawWalletDebit && onAfterWalletDebit != null) {
+					hookToRun = onAfterWalletDebit;
+					onAfterWalletDebit = null;
 				}
 			}
-			long currentVersion = latestVersion(aggregateId);
-			if (currentVersion != expectedVersion) {
-				throw new OptimisticConcurrencyException(
-						"Expected version " + expectedVersion + " but was " + currentVersion);
+			if (hookToRun != null) {
+				hookToRun.run();
 			}
-			long version = expectedVersion;
-			boolean sawWalletDebit = false;
-			for (PendingEvent p : pending) {
-				version++;
-				events.add(new StoredEvent(p.eventId(), aggregateId, aggregateType, version, p.event().eventType(), 1,
-						FIXED_NOW, p.correlationId(), p.causationId(), p.event()));
-				if (p.event() instanceof WalletDebited) {
-					sawWalletDebit = true;
-				}
-			}
-			if (sawWalletDebit && onAfterWalletDebit != null) {
-				Runnable hook = onAfterWalletDebit;
-				onAfterWalletDebit = null;
-				hook.run();
+		}
+
+		int walletAppendCountForTx(UUID txId) {
+			synchronized (events) {
+				AtomicInteger count = walletAppendsByTx.get(txId);
+				return count != null ? count.get() : 0;
 			}
 		}
 
 		@Override
 		public List<StoredEvent> load(UUID aggregateId, long afterVersion) {
-			return events.stream()
-					.filter(e -> e.aggregateId().equals(aggregateId) && e.version() > afterVersion)
-					.toList();
+			synchronized (events) {
+				return events.stream()
+						.filter(e -> e.aggregateId().equals(aggregateId) && e.version() > afterVersion)
+						.toList();
+			}
 		}
 
 		@Override
 		public boolean contains(UUID eventId) {
+			synchronized (events) {
+				return containsUnlocked(eventId);
+			}
+		}
+
+		private boolean containsUnlocked(UUID eventId) {
 			return events.stream().anyMatch(e -> e.eventId().equals(eventId));
 		}
 
 		@Override
 		public Optional<StoredEvent> findEvent(UUID eventId) {
-			return events.stream().filter(e -> e.eventId().equals(eventId)).findFirst();
+			synchronized (events) {
+				return events.stream().filter(e -> e.eventId().equals(eventId)).findFirst();
+			}
 		}
 
 		@Override
 		public long latestVersion(UUID aggregateId) {
+			synchronized (events) {
+				return latestVersionUnlocked(aggregateId);
+			}
+		}
+
+		private long latestVersionUnlocked(UUID aggregateId) {
 			return events.stream().filter(e -> e.aggregateId().equals(aggregateId))
 					.mapToLong(StoredEvent::version).max().orElse(0L);
 		}
@@ -595,8 +715,8 @@ class TransferSagaOrchestratorUnitTest {
 		}
 
 		@Override
-		public boolean insertInitiated(UUID transferId, UUID sourceWalletId, UUID destinationWalletId, Money amount,
-				TransferType type, UUID originalTransferId, long dailyLimitVnd) {
+		public synchronized boolean insertInitiated(UUID transferId, UUID sourceWalletId, UUID destinationWalletId,
+				Money amount, TransferType type, UUID originalTransferId, long dailyLimitVnd) {
 			if (rows.containsKey(transferId)) {
 				return false;
 			}
@@ -626,7 +746,7 @@ class TransferSagaOrchestratorUnitTest {
 		}
 
 		@Override
-		public void updateStatus(UUID transferId, TransferStatus status, String failureReason) {
+		public synchronized void updateStatus(UUID transferId, TransferStatus status, String failureReason) {
 			TransferSagaSummary existing = rows.get(transferId);
 			if (existing != null) {
 				rows.put(transferId, new TransferSagaSummary(existing.transferId(), existing.sourceWalletId(),
@@ -637,7 +757,7 @@ class TransferSagaOrchestratorUnitTest {
 		}
 
 		@Override
-		public long sumOutgoingLast24Hours(UUID sourceWalletId) {
+		public synchronized long sumOutgoingLast24Hours(UUID sourceWalletId) {
 			Instant cutoff = clock.instant().minus(Duration.ofHours(24));
 			return rows.values().stream()
 					.filter(r -> r.sourceWalletId().equals(sourceWalletId)
@@ -651,7 +771,7 @@ class TransferSagaOrchestratorUnitTest {
 		}
 
 		@Override
-		public Optional<TransferSagaSummary> findById(UUID transferId) {
+		public synchronized Optional<TransferSagaSummary> findById(UUID transferId) {
 			return Optional.ofNullable(rows.get(transferId));
 		}
 	}

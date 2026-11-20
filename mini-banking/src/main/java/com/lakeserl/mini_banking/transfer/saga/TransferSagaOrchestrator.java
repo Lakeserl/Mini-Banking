@@ -4,9 +4,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -60,6 +63,9 @@ public class TransferSagaOrchestrator {
 	public static final int DEFAULT_MAX_CONTENTION_RETRIES = 12;
 	public static final long DEFAULT_CONTENTION_BACKOFF_MIN_MS = 5L;
 	public static final long DEFAULT_CONTENTION_BACKOFF_MAX_MS = 25L;
+	private static final int LOCK_STRIPES = 256;
+
+	private static final Logger log = LoggerFactory.getLogger(TransferSagaOrchestrator.class);
 
 	private final TransferRepository transferRepository;
 	private final TransferSagaStateStore sagaStateStore;
@@ -70,6 +76,7 @@ public class TransferSagaOrchestrator {
 	private final int maxContentionRetries;
 	private final long backoffMinMs;
 	private final long backoffMaxMs;
+	private final ReentrantLock[] transferLocks;
 
 	public TransferSagaOrchestrator(TransferRepository transferRepository,
 			TransferSagaStateStore sagaStateStore,
@@ -114,6 +121,10 @@ public class TransferSagaOrchestrator {
 		this.maxContentionRetries = maxContentionRetries;
 		this.backoffMinMs = backoffMinMs;
 		this.backoffMaxMs = backoffMaxMs;
+		this.transferLocks = new ReentrantLock[LOCK_STRIPES];
+		for (int i = 0; i < LOCK_STRIPES; i++) {
+			this.transferLocks[i] = new ReentrantLock();
+		}
 	}
 
 	public Optional<Transfer> findTransfer(UUID transferId) {
@@ -235,17 +246,43 @@ public class TransferSagaOrchestrator {
 
 	public Transfer resume(UUID transferId, int currentRetryCount, int maxRetries) {
 		Objects.requireNonNull(transferId, "transferId must not be null");
-		Transfer transfer = transferRepository.load(transferId)
-				.orElseThrow(() -> new TransferNotFoundException(transferId));
-		if (transfer.status().isTerminal()) {
-			tx.executeWithoutResult(
-					status -> sagaStateStore.updateStatus(transfer.id(), transfer.status(), transfer.failureReason()));
-			return transfer;
+		ReentrantLock lock = lockFor(transferId);
+		lock.lock();
+		try {
+			Transfer transfer = transferRepository.load(transferId)
+					.orElseThrow(() -> new TransferNotFoundException(transferId));
+			if (transfer.status().isTerminal()) {
+				tx.executeWithoutResult(
+						status -> sagaStateStore.updateStatus(transfer.id(), transfer.status(), transfer.failureReason()));
+				return transfer;
+			}
+			return advanceUnlocked(transfer, currentRetryCount, maxRetries);
+		} finally {
+			lock.unlock();
 		}
-		return advance(transfer, currentRetryCount, maxRetries);
 	}
 
-	private Transfer advance(Transfer transfer, int currentRetryCount, int maxRetries) {
+	private Transfer advance(Transfer initialTransfer, int currentRetryCount, int maxRetries) {
+		UUID transferId = initialTransfer.id();
+		ReentrantLock lock = lockFor(transferId);
+		lock.lock();
+		try {
+			Transfer transfer = transferRepository.load(transferId)
+					.orElseThrow(() -> new TransferNotFoundException(transferId));
+			if (transfer.status().isTerminal()) {
+				return transfer;
+			}
+			return advanceUnlocked(transfer, currentRetryCount, maxRetries);
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	private ReentrantLock lockFor(UUID transferId) {
+		return transferLocks[Math.floorMod(transferId.hashCode(), LOCK_STRIPES)];
+	}
+
+	private Transfer advanceUnlocked(Transfer transfer, int currentRetryCount, int maxRetries) {
 		if (transfer.status() == TransferStatus.INITIATED) {
 			if (eventStore.findEvent(Wallet.debitEventId(transfer.id(), transfer.sourceWalletId())).isPresent()) {
 				transfer = saveTransition(transfer, TransferStatus.INITIATED, Transfer::markDebitCompleted);
@@ -260,6 +297,8 @@ public class TransferSagaOrchestrator {
 				} catch (InsufficientFundsException | WalletLockedException | WalletNotFoundException ex) {
 					return saveTransition(transfer, TransferStatus.INITIATED, t -> t.fail(ex.getMessage()));
 				} catch (RuntimeException ex) {
+					log.warn("Transient failure during debit for transfer {} (status={}, retry={}/{}): {}",
+							transfer.id(), transfer.status(), currentRetryCount, maxRetries, ex.getMessage(), ex);
 					if (eventStore.findEvent(Wallet.debitEventId(transfer.id(), transfer.sourceWalletId()))
 							.isPresent()) {
 						transfer = saveTransition(transfer, TransferStatus.INITIATED, Transfer::markDebitCompleted);
@@ -285,6 +324,8 @@ public class TransferSagaOrchestrator {
 				transfer = saveTransition(transfer, TransferStatus.DEBITED,
 						t -> t.startCompensation(ex.getMessage()));
 			} catch (RuntimeException ex) {
+				log.warn("Transient failure during credit for transfer {} (status={}, retry={}/{}): {}",
+						transfer.id(), transfer.status(), currentRetryCount, maxRetries, ex.getMessage(), ex);
 				if (eventStore.findEvent(Wallet.creditEventId(transfer.id(), transfer.destinationWalletId()))
 						.isPresent()) {
 					return saveTransition(transfer, TransferStatus.DEBITED, Transfer::markCreditAndComplete);
@@ -306,6 +347,8 @@ public class TransferSagaOrchestrator {
 						TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING));
 				return saveTransition(transfer, TransferStatus.REVERSING, Transfer::markCompensated);
 			} catch (RuntimeException ex) {
+				log.error("Compensation credit failed for transfer {} (status={}, retry={}/{}): {}",
+						transfer.id(), transfer.status(), currentRetryCount, maxRetries, ex.getMessage(), ex);
 				if (eventStore.findEvent(Wallet.creditEventId(transfer.id(), transfer.sourceWalletId()))
 						.isPresent()) {
 					return saveTransition(transfer, TransferStatus.REVERSING, Transfer::markCompensated);

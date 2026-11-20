@@ -29,6 +29,7 @@ import com.lakeserl.mini_banking.wallet.domain.events.WalletOpened;
 public class LedgerProjector {
 
 	public static final String DEFAULT_CONSUMER_GROUP = "ledger-projector";
+	public static final int MAX_CONSUMER_GROUP_LENGTH = 50;
 
 	private static final String ENTRY_DEBIT = "DEBIT";
 	private static final String ENTRY_CREDIT = "CREDIT";
@@ -58,6 +59,10 @@ public class LedgerProjector {
 		if (consumerGroup.isBlank()) {
 			throw new IllegalArgumentException("consumerGroup must not be blank");
 		}
+		if (consumerGroup.length() > MAX_CONSUMER_GROUP_LENGTH) {
+			throw new IllegalArgumentException(
+					"consumerGroup length must be <= " + MAX_CONSUMER_GROUP_LENGTH + ", got " + consumerGroup.length());
+		}
 		this.consumerGroup = consumerGroup;
 	}
 
@@ -74,10 +79,9 @@ public class LedgerProjector {
 		Objects.requireNonNull(eventId, "eventId");
 		Objects.requireNonNull(event, "event");
 		Objects.requireNonNull(occurredAt, "occurredAt");
+		validateEvent(event);
 
 		Boolean applied = tx.execute(status -> {
-			validateEvent(event);
-
 			int inserted = jdbc.update(INSERT_PROCESSED_EVENT_SQL, consumerGroup, eventId);
 			if (inserted == 0) {
 				return false;

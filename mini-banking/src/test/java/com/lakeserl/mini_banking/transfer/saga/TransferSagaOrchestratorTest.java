@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.lakeserl.mini_banking.PostgresDataTest;
 import com.lakeserl.mini_banking.shared.domain.AccountType;
@@ -54,6 +55,9 @@ class TransferSagaOrchestratorTest {
 	@Autowired
 	EventStore eventStore;
 
+	@Autowired
+	TransactionTemplate tx;
+
 	private UUID openFundedWallet(long initialVnd) {
 		UUID walletId = walletHandler.openWallet(UUID.randomUUID(), Currency.VND);
 		if (initialVnd > 0) {
@@ -61,6 +65,23 @@ class TransferSagaOrchestratorTest {
 					"BANK_SETTLEMENT", AccountType.SETTLEMENT);
 		}
 		return walletId;
+	}
+
+	private void seedDebitedTransfer(UUID transferId, UUID sourceId, UUID destId, Money amount) {
+		tx.executeWithoutResult(status -> {
+			sagaStateStore.insertInitiated(transferId, sourceId, destId, amount,
+					TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
+			transferRepository.save(Transfer.initiate(transferId, sourceId, destId, amount,
+					TransferType.STANDARD, null));
+		});
+		walletHandler.debit(sourceId, transferId, amount,
+				TransferSagaOrchestrator.TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING);
+		tx.executeWithoutResult(status -> {
+			Transfer latest = transferRepository.load(transferId).orElseThrow();
+			latest.markDebitCompleted();
+			transferRepository.save(latest);
+			sagaStateStore.updateStatus(transferId, TransferStatus.DEBITED, null);
+		});
 	}
 
 	@Test
@@ -181,15 +202,7 @@ class TransferSagaOrchestratorTest {
 		UUID transferId = UUID.randomUUID();
 
 		// Simulate in-flight transfer that completed source debit and persisted DEBITED, then dest was locked
-		sagaStateStore.insertInitiated(transferId, sourceId, destId, Money.vnd(200_000L),
-				TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
-		Transfer transfer = Transfer.initiate(transferId, sourceId, destId, Money.vnd(200_000L),
-				TransferType.STANDARD, null);
-		walletHandler.debit(sourceId, transferId, Money.vnd(200_000L),
-				TransferSagaOrchestrator.TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING);
-		transfer.markDebitCompleted();
-		transferRepository.save(transfer);
-		sagaStateStore.updateStatus(transferId, TransferStatus.DEBITED, null);
+		seedDebitedTransfer(transferId, sourceId, destId, Money.vnd(200_000L));
 
 		walletHandler.lockWallet(destId, "destination frozen mid-saga");
 
@@ -214,15 +227,7 @@ class TransferSagaOrchestratorTest {
 		UUID destId = openFundedWallet(100_000L);
 		UUID transferId = UUID.randomUUID();
 
-		sagaStateStore.insertInitiated(transferId, sourceId, destId, Money.vnd(200_000L),
-				TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
-		Transfer transfer = Transfer.initiate(transferId, sourceId, destId, Money.vnd(200_000L),
-				TransferType.STANDARD, null);
-		walletHandler.debit(sourceId, transferId, Money.vnd(200_000L),
-				TransferSagaOrchestrator.TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING);
-		transfer.markDebitCompleted();
-		transferRepository.save(transfer);
-		sagaStateStore.updateStatus(transferId, TransferStatus.DEBITED, null);
+		seedDebitedTransfer(transferId, sourceId, destId, Money.vnd(200_000L));
 
 		walletHandler.lockWallet(destId, "destination locked");
 		walletHandler.lockWallet(sourceId, "source also locked before compensation");
@@ -300,26 +305,30 @@ class TransferSagaOrchestratorTest {
 				.isInstanceOf(InvalidTransferStateException.class);
 
 		UUID debitedId = UUID.randomUUID();
-		sagaStateStore.insertInitiated(debitedId, senderId, thirdId, Money.vnd(100_000L),
-				TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
-		Transfer debited = Transfer.initiate(debitedId, senderId, thirdId, Money.vnd(100_000L),
-				TransferType.STANDARD, null);
-		debited.markDebitCompleted();
-		transferRepository.save(debited);
-		sagaStateStore.updateStatus(debitedId, TransferStatus.DEBITED, null);
+		tx.executeWithoutResult(status -> {
+			sagaStateStore.insertInitiated(debitedId, senderId, thirdId, Money.vnd(100_000L),
+					TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
+			Transfer debited = Transfer.initiate(debitedId, senderId, thirdId, Money.vnd(100_000L),
+					TransferType.STANDARD, null);
+			debited.markDebitCompleted();
+			transferRepository.save(debited);
+			sagaStateStore.updateStatus(debitedId, TransferStatus.DEBITED, null);
+		});
 		assertThatThrownBy(() -> orchestrator.refund(UUID.randomUUID(), debitedId))
 				.isInstanceOf(InvalidTransferStateException.class);
 
 		UUID reversedId = UUID.randomUUID();
-		sagaStateStore.insertInitiated(reversedId, senderId, thirdId, Money.vnd(100_000L),
-				TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
-		Transfer reversed = Transfer.initiate(reversedId, senderId, thirdId, Money.vnd(100_000L),
-				TransferType.STANDARD, null);
-		reversed.markDebitCompleted();
-		reversed.startCompensation("dest locked");
-		reversed.markCompensated();
-		transferRepository.save(reversed);
-		sagaStateStore.updateStatus(reversedId, TransferStatus.REVERSED, "dest locked");
+		tx.executeWithoutResult(status -> {
+			sagaStateStore.insertInitiated(reversedId, senderId, thirdId, Money.vnd(100_000L),
+					TransferType.STANDARD, null, TransferSagaOrchestrator.MAX_DAILY_OUTGOING_VND);
+			Transfer reversed = Transfer.initiate(reversedId, senderId, thirdId, Money.vnd(100_000L),
+					TransferType.STANDARD, null);
+			reversed.markDebitCompleted();
+			reversed.startCompensation("dest locked");
+			reversed.markCompensated();
+			transferRepository.save(reversed);
+			sagaStateStore.updateStatus(reversedId, TransferStatus.REVERSED, "dest locked");
+		});
 		assertThatThrownBy(() -> orchestrator.refund(UUID.randomUUID(), reversedId))
 				.isInstanceOf(InvalidTransferStateException.class);
 

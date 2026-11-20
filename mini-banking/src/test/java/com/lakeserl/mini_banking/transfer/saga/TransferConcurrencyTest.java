@@ -2,10 +2,10 @@ package com.lakeserl.mini_banking.transfer.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -110,12 +110,12 @@ class TransferConcurrencyTest {
 
 		// If any saga remained non-terminal under extreme contention, age non-terminal rows and let recoverOnce() finish them
 		for (int sweep = 0; sweep < 5; sweep++) {
-			Instant oldInstant = clock.instant().minusSeconds(60);
+			OffsetDateTime oldTimestamp = OffsetDateTime.ofInstant(clock.instant().minusSeconds(60), ZoneOffset.UTC);
 			jdbc.update("""
 					UPDATE transfer_saga_state
 					SET updated_at = ?
 					WHERE status IN ('INITIATED', 'DEBITED', 'REVERSING')
-					""", Timestamp.from(oldInstant));
+					""", oldTimestamp);
 			if (recoveryScheduler.recoverOnce() == 0) {
 				break;
 			}

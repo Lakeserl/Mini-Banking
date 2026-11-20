@@ -2,10 +2,10 @@ package com.lakeserl.mini_banking.transfer.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -75,9 +75,9 @@ class SagaRecoverySchedulerTest {
 	}
 
 	private void ageSagaRow(UUID transferId, Duration age) {
-		Instant oldInstant = clock.instant().minus(age);
+		OffsetDateTime oldTimestamp = OffsetDateTime.ofInstant(clock.instant().minus(age), ZoneOffset.UTC);
 		jdbc.update("UPDATE transfer_saga_state SET updated_at = ? WHERE transfer_id = ?",
-				Timestamp.from(oldInstant), transferId);
+				oldTimestamp, transferId);
 	}
 
 	@Test

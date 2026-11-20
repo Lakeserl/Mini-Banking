@@ -34,7 +34,6 @@ import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolat
 @Repository
 public class TransferSagaStateStore {
 
-	public static final String PK_TRANSFER_ID = "transfer_saga_state_pkey";
 	public static final String UQ_ACTIVE_REFUND = "uq_transfer_active_refund";
 
 	public record StuckSaga(UUID transferId, TransferStatus status, int retryCount) {
@@ -152,9 +151,11 @@ public class TransferSagaStateStore {
 
 		if (type == TransferType.STANDARD) {
 			jdbc.query(ADVISORY_LOCK, (rs, rowNum) -> null, sourceWalletId.toString());
-			if (Boolean.TRUE.equals(jdbc.queryForObject(EXISTS_BY_ID, Boolean.class, transferId))) {
-				return false;
-			}
+		}
+		if (Boolean.TRUE.equals(jdbc.queryForObject(EXISTS_BY_ID, Boolean.class, transferId))) {
+			return false;
+		}
+		if (type == TransferType.STANDARD) {
 			long spent24h = sumOutgoingLast24Hours(sourceWalletId);
 			enforceDailyLimit(sourceWalletId, spent24h, amount.amount(), dailyLimitVnd);
 		}
@@ -166,7 +167,7 @@ public class TransferSagaStateStore {
 					now, now);
 			return rows == 1;
 		} catch (DuplicateKeyException e) {
-			return handleDuplicateKeyException(e, originalTransferId);
+			throw handleDuplicateKeyException(e, originalTransferId);
 		}
 	}
 
@@ -226,7 +227,7 @@ public class TransferSagaStateStore {
 		}
 	}
 
-	private static boolean handleDuplicateKeyException(DuplicateKeyException e, UUID originalTransferId) {
+	private static RuntimeException handleDuplicateKeyException(DuplicateKeyException e, UUID originalTransferId) {
 		Throwable cause = e.getCause();
 		while (cause != null) {
 			if (cause instanceof PSQLException psqlEx) {
@@ -234,16 +235,13 @@ public class TransferSagaStateStore {
 						? psqlEx.getServerErrorMessage().getConstraint()
 						: null;
 				if (UQ_ACTIVE_REFUND.equals(constraint)) {
-					throw new InvalidTransferStateException(
+					return new InvalidTransferStateException(
 							"Transfer " + originalTransferId + " already has an active or completed refund");
 				}
-				if (PK_TRANSFER_ID.equals(constraint)) {
-					return false;
-				}
-				throw e;
+				return e;
 			}
 			cause = cause.getCause();
 		}
-		throw e;
+		return e;
 	}
 }

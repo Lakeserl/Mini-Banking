@@ -71,7 +71,11 @@ public class SagaRecoveryScheduler {
 
 	@Scheduled(fixedDelayString = "${transfer.recovery.poll-interval-ms:10000}")
 	public void schedule() {
-		recoverOnce();
+		try {
+			recoverOnce();
+		} catch (RuntimeException ex) {
+			log.warn("Saga recovery sweep failed; will retry", ex);
+		}
 	}
 
 	public int recoverOnce() {

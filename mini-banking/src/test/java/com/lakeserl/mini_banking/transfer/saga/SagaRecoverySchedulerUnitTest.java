@@ -1,8 +1,12 @@
 package com.lakeserl.mini_banking.transfer.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -392,6 +396,17 @@ class SagaRecoverySchedulerUnitTest {
 				.isEqualTo(Money.vnd(300_000L));
 		assertThat(walletRepository.load(destId)).get().extracting(Wallet::balance)
 				.isEqualTo(Money.vnd(300_000L));
+	}
+
+	@Test
+	void schedule_catchesTransientRuntimeExceptionFromFindStuckWithoutPropagating() {
+		TransferSagaStateStore failingStore = mock(TransferSagaStateStore.class);
+		when(failingStore.findStuck(any(Duration.class), anyInt()))
+				.thenThrow(new IllegalStateException("database temporarily unreachable"));
+		SagaRecoveryScheduler resilientScheduler = new SagaRecoveryScheduler(failingStore, orchestrator,
+				Duration.ofSeconds(30), 3, 50);
+
+		assertThatCode(resilientScheduler::schedule).doesNotThrowAnyException();
 	}
 
 	@Test

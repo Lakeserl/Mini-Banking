@@ -151,9 +151,12 @@ public class TransferController {
 	}
 
 	private void requireReceiverOrAdmin(Transfer original, UUID userId, Authentication auth) {
+		if (isAdmin(auth)) {
+			return;
+		}
 		Wallet originalDestWallet = walletRepository.load(original.destinationWalletId())
 				.orElseThrow(() -> new WalletNotFoundException(original.destinationWalletId()));
-		if (originalDestWallet.ownerId().equals(userId) || isAdmin(auth)) {
+		if (originalDestWallet.ownerId().equals(userId)) {
 			return;
 		}
 		throw new AccessDeniedException(
