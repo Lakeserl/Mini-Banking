@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -28,7 +29,9 @@ class KafkaOutboxPublisherTest {
 	void publishSendsToAggregateTopicWithKeyAndHeaders() {
 		UUID eventId = UUID.randomUUID();
 		UUID aggregateId = UUID.randomUUID();
-		OutboxMessage msg = new OutboxMessage(1L, eventId, aggregateId, "Wallet", "WalletCredited", "{\"amount\":100}");
+		Instant occurredAt = Instant.parse("2026-11-19T10:30:00.123456Z");
+		OutboxMessage msg = new OutboxMessage(1L, eventId, aggregateId, "Wallet", "WalletCredited", "{\"amount\":100}",
+				occurredAt);
 		when(kafka.send(any(ProducerRecord.class)))
 				.thenReturn(CompletableFuture.completedFuture(mock(SendResult.class)));
 
@@ -45,17 +48,29 @@ class KafkaOutboxPublisherTest {
 				.isEqualTo("WalletCredited");
 		assertThat(new String(record.headers().lastHeader("event-id").value(), StandardCharsets.UTF_8))
 				.isEqualTo(eventId.toString());
+		assertThat(new String(record.headers().lastHeader("occurred-at").value(), StandardCharsets.UTF_8))
+				.isEqualTo(occurredAt.toString());
 	}
 
 	@Test
 	@SuppressWarnings("unchecked")
 	void publishWrapsSendFailureInOutboxPublishException() {
-		OutboxMessage msg = new OutboxMessage(2L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}");
+		OutboxMessage msg = new OutboxMessage(2L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}",
+				Instant.parse("2026-11-19T10:30:00Z"));
 		CompletableFuture<SendResult<String, String>> failed = new CompletableFuture<>();
 		failed.completeExceptionally(new RuntimeException("broker down"));
 		when(kafka.send(any(ProducerRecord.class))).thenReturn(failed);
 
 		assertThatThrownBy(() -> publisher.publish(msg))
 				.isInstanceOf(OutboxPublishException.class);
+	}
+
+	@Test
+	void publishRejectsNullOccurredAt() {
+		OutboxMessage msg = new OutboxMessage(3L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}",
+				null);
+
+		assertThatThrownBy(() -> publisher.publish(msg))
+				.isInstanceOf(NullPointerException.class);
 	}
 }

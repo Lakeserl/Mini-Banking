@@ -1,5 +1,6 @@
 package com.lakeserl.mini_banking.shared.outbox;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -24,7 +25,7 @@ public class OutboxRelay {
 	private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
 
 	private static final String SELECT_PENDING = """
-			SELECT id, event_id, aggregate_id, aggregate_type, event_type, payload::text AS payload
+			SELECT id, event_id, aggregate_id, aggregate_type, event_type, payload::text AS payload, created_at
 			FROM outbox WHERE published_at IS NULL ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED
 			""";
 
@@ -59,7 +60,8 @@ public class OutboxRelay {
 		tx.executeWithoutResult(status -> {
 			List<OutboxMessage> pending = jdbc.query(SELECT_PENDING, (rs, i) -> new OutboxMessage(rs.getLong("id"),
 					rs.getObject("event_id", UUID.class), rs.getObject("aggregate_id", UUID.class),
-					rs.getString("aggregate_type"), rs.getString("event_type"), rs.getString("payload")), batchSize);
+					rs.getString("aggregate_type"), rs.getString("event_type"), rs.getString("payload"),
+					rs.getObject("created_at", OffsetDateTime.class).toInstant()), batchSize);
 			for (OutboxMessage message : pending) {
 				try {
 					publisher.publish(message);
