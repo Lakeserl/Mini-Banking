@@ -111,7 +111,7 @@ class PostgresEventStoreTest {
 		try {
 			List<Future<Boolean>> results = new ArrayList<>();
 			for (int i = 0; i < writers; i++) {
-				PendingEvent event = i == 0 ? opened(id) : credited(id, i);
+				PendingEvent event = opened(id);
 				results.add(pool.submit(() -> {
 					ready.countDown();
 					go.await();

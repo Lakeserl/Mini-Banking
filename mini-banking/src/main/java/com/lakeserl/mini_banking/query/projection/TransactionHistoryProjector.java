@@ -183,7 +183,10 @@ public class TransactionHistoryProjector {
 
 	private void updateStatus(UUID transactionId, String status, String bankReference, String failureReason,
 			OffsetDateTime updatedAt) {
-		jdbc.update(UPDATE_STATUS_SQL, status, bankReference, failureReason, updatedAt, transactionId);
+		int updated = jdbc.update(UPDATE_STATUS_SQL, status, bankReference, failureReason, updatedAt, transactionId);
+		if (updated == 0) {
+			throw new IllegalStateException("Transaction history row missing for status update: " + transactionId);
+		}
 	}
 
 	private void incrementDailyReport(UUID transactionId, Instant occurredAt, OffsetDateTime updatedAt) {

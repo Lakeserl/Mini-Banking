@@ -161,7 +161,7 @@ class LedgerKafkaConsumerTest {
 	@Test
 	void conditionalPropertyDisablesLedgerKafkaConsumerAndErrorHandler() {
 		new ApplicationContextRunner()
-				.withPropertyValues("ledger.consumer.enabled=false")
+				.withPropertyValues("ledger.consumer.enabled=false", "query.consumer.enabled=false")
 				.withBean(EventSerializer.class, () -> serializer)
 				.withBean(LedgerProjector.class, () -> projector)
 				.withBean(KafkaTemplate.class, () -> mock(KafkaTemplate.class))

@@ -71,7 +71,20 @@ class TransactionHistoryProjectorUnitTest {
 		tx = mock(TransactionTemplate.class);
 		when(tx.execute(any(TransactionCallback.class))).thenAnswer(inv -> {
 			TransactionCallback<Object> cb = inv.getArgument(0);
-			return cb.doInTransaction(mock(TransactionStatus.class));
+			Set<String> processedSnapshot = new HashSet<>(processed);
+			Map<String, TxRow> txSnapshot = new HashMap<>(txRows);
+			Map<String, DailyRow> dailySnapshot = new HashMap<>(dailyRows);
+			try {
+				return cb.doInTransaction(mock(TransactionStatus.class));
+			} catch (RuntimeException ex) {
+				processed.clear();
+				processed.addAll(processedSnapshot);
+				txRows.clear();
+				txRows.putAll(txSnapshot);
+				dailyRows.clear();
+				dailyRows.putAll(dailySnapshot);
+				throw ex;
+			}
 		});
 
 		when(jdbc.update(anyString(), any(Object[].class))).thenAnswer(inv -> {
@@ -296,6 +309,19 @@ class TransactionHistoryProjectorUnitTest {
 
 		assertThat(txRows.get(depositId + ":" + walletId).status()).isEqualTo("FAILED");
 		assertThat(txRows.get(depositId + ":" + walletId).failureReason()).isEqualTo("card declined");
+		assertThat(dailyRows).isEmpty();
+	}
+
+	@Test
+	void statusUpdateForMissingTransactionThrowsAndRollsBackProcessedEvent() {
+		UUID missingDepositId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant t1 = Instant.parse("2026-11-21T07:05:00Z");
+
+		assertThatThrownBy(() -> projector.project(eventId, new DepositConfirmed(missingDepositId), t1))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining(missingDepositId.toString());
+		assertThat(processed).doesNotContain(TransactionHistoryProjector.DEFAULT_CONSUMER_GROUP + ":" + eventId);
 		assertThat(dailyRows).isEmpty();
 	}
 }

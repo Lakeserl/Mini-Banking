@@ -94,8 +94,9 @@ public class ProjectionRebuildService {
 			throw new RebuildInProgressException("Projection rebuild is already in progress");
 		}
 		Instant startedAt = clock.instant();
-		List<MessageListenerContainer> pausedContainers = pauseRunningListeners();
+		List<MessageListenerContainer> pausedContainers = new ArrayList<>();
 		try {
+			pauseRunningListeners(pausedContainers);
 			tx.execute(status -> {
 				jdbc.execute(TRUNCATE_PROJECTIONS_SQL);
 				jdbc.update(DELETE_PROCESSED_SQL,
@@ -141,19 +142,17 @@ public class ProjectionRebuildService {
 		}
 	}
 
-	private List<MessageListenerContainer> pauseRunningListeners() {
+	private void pauseRunningListeners(List<MessageListenerContainer> paused) {
 		KafkaListenerEndpointRegistry registry = listenerRegistryProvider.getIfAvailable();
 		if (registry == null) {
-			return List.of();
+			return;
 		}
-		List<MessageListenerContainer> paused = new ArrayList<>();
 		for (MessageListenerContainer container : registry.getListenerContainers()) {
 			if (container.isRunning()) {
 				container.pause();
 				paused.add(container);
 			}
 		}
-		return paused;
 	}
 
 	private void resumeListeners(List<MessageListenerContainer> containers) {

@@ -149,6 +149,26 @@ class ProjectionRebuildServiceUnitTest {
 	}
 
 	@Test
+	void pauseFailureStillResumesEarlierContainersAndReleasesLock() {
+		MessageListenerContainer c1 = mock(MessageListenerContainer.class);
+		MessageListenerContainer c2 = mock(MessageListenerContainer.class);
+		when(c1.isRunning()).thenReturn(true);
+		when(c2.isRunning()).thenReturn(true);
+		org.mockito.Mockito.doThrow(new IllegalStateException("pause failed")).when(c2).pause();
+		when(registry.getListenerContainers()).thenReturn(List.of(c1, c2));
+
+		assertThatThrownBy(() -> service.rebuildAll())
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("pause failed");
+		verify(c1).pause();
+		verify(c1).resume();
+
+		when(registry.getListenerContainers()).thenReturn(List.of(container));
+		when(eventStore.loadBatch(0L, 2)).thenReturn(List.of());
+		assertThat(service.rebuildAll().eventsReplayed()).isZero();
+	}
+
+	@Test
 	void concurrentRebuildThrowsRebuildInProgressException() throws Exception {
 		CountDownLatch entered = new CountDownLatch(1);
 		CountDownLatch release = new CountDownLatch(1);

@@ -151,7 +151,7 @@ class QueryKafkaConsumerTest {
 	}, properties = {
 			"spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
 			"spring.kafka.consumer.auto-offset-reset=earliest",
-			"ledger.consumer.enabled=true",
+			"ledger.consumer.enabled=false",
 			"ledger.consumer.retry-backoff-ms=10",
 			"query.consumer.enabled=true",
 			"query.consumer.balance-group-id=test-balance-projector",

@@ -2,7 +2,7 @@ package com.lakeserl.mini_banking.ledger.projection;
 
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -12,11 +12,11 @@ import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.util.backoff.FixedBackOff;
 
 /**
- * Configures 3x retry + dead-letter topic ({@code <topic>.DLT}) recovery for the ledger Kafka consumer
+ * Configures 3x retry + dead-letter topic ({@code <topic>.DLT}) recovery for projection Kafka consumers
  * while preserving Spring Boot's auto-configured {@code kafkaListenerContainerFactory}.
  */
 @Configuration
-@ConditionalOnProperty(name = "ledger.consumer.enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnExpression("${ledger.consumer.enabled:true} or ${query.consumer.enabled:true}")
 public class LedgerKafkaConfig {
 
 	static final long MAX_RETRIES = 3L;
