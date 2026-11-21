@@ -53,3 +53,12 @@ query:
     tx-history-group-id: tx-history-projector
   rebuild:
     batch-size: 500
+
+reconciliation:
+  internal:
+    enabled: true
+    interval-ms: 3600000
+  bank:
+    enabled: true
+    cron: "0 15 0 * * *"
+    pending-deposit-threshold-seconds: 300

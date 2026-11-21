@@ -43,6 +43,12 @@ public class QueryRepository {
 			WHERE wallet_id = ?
 			""";
 
+	private static final String SELECT_ALL_BALANCES_SQL = """
+			SELECT wallet_id, owner_id, currency, balance, status, aggregate_version, updated_at
+			FROM wallet_balances
+			ORDER BY wallet_id ASC
+			""";
+
 	private static final String SELECT_TX_FIRST_PAGE_SQL = """
 			SELECT id, transaction_id, wallet_id, tx_type, direction, amount, currency, status,
 			       counterpart_wallet_id, counterpart_label, bank_reference, original_transfer_id,
@@ -115,6 +121,10 @@ public class QueryRepository {
 	public Optional<WalletBalanceRow> findBalance(UUID walletId) {
 		Objects.requireNonNull(walletId, "walletId");
 		return jdbc.query(SELECT_BALANCE_SQL, BALANCE_MAPPER, walletId).stream().findFirst();
+	}
+
+	public List<WalletBalanceRow> findAllBalances() {
+		return jdbc.query(SELECT_ALL_BALANCES_SQL, BALANCE_MAPPER);
 	}
 
 	public List<TransactionHistoryRow> findTransactions(UUID walletId, Cursor cursor, int fetchSize) {

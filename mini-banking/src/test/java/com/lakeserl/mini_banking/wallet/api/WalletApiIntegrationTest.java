@@ -42,6 +42,8 @@ import tools.jackson.databind.json.JsonMapper;
 		"transfer.recovery.enabled=false",
 		"ledger.consumer.enabled=false",
 		"query.consumer.enabled=false",
+		"reconciliation.internal.enabled=false",
+		"reconciliation.bank.enabled=false",
 		"security.jwt.secret=" + WalletApiIntegrationTest.TEST_JWT_SECRET })
 @AutoConfigureMockMvc
 @ContextConfiguration(initializers = PostgresContainerInitializer.class)

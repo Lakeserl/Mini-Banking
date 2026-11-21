@@ -89,6 +89,12 @@ public class TransferSagaStateStore {
 			RETURNING retry_count
 			""";
 
+	private static final String SUM_IN_FLIGHT_CLEARING = """
+			SELECT COALESCE(SUM(amount), 0)
+			FROM transfer_saga_state
+			WHERE status IN ('DEBITED', 'REVERSING')
+			""";
+
 	private static final String FIND_BY_ID = """
 			SELECT transfer_id, source_wallet_id, dest_wallet_id, amount, currency,
 			       transfer_type, original_transfer_id, status, retry_count, failure_reason,
@@ -225,6 +231,12 @@ public class TransferSagaStateStore {
 					"Daily outgoing transfer limit of " + dailyLimitVnd + " VND exceeded for wallet "
 							+ sourceWalletId + " (spent24h=" + spent24h + ", requested=" + requestedAmount + ")");
 		}
+	}
+
+	/** Total amount currently held in {@code TRANSFER_CLEARING} by active {@code DEBITED}/{@code REVERSING} sagas. */
+	public long sumInFlightClearingAmount() {
+		Long sum = jdbc.queryForObject(SUM_IN_FLIGHT_CLEARING, Long.class);
+		return sum != null ? sum : 0L;
 	}
 
 	private static RuntimeException handleDuplicateKeyException(DuplicateKeyException e, UUID originalTransferId) {
