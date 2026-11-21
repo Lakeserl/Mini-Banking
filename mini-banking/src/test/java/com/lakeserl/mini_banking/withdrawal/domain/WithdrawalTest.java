@@ -33,9 +33,21 @@ class WithdrawalTest {
 		assertThat(replayed.id()).isEqualTo(withdrawalId);
 		assertThat(replayed.walletId()).isEqualTo(walletId);
 		assertThat(replayed.amount()).isEqualTo(Money.vnd(300_000));
-		assertThat(replayed.bankAccount()).isEqualTo("970436-111");
+		assertThat(replayed.bankAccount()).isEqualTo("****-111");
 		assertThat(replayed.bankReference()).isEqualTo("BANK-PAY-1");
 		assertThat(replayed.status()).isEqualTo(WithdrawalStatus.CONFIRMED);
+	}
+
+	@Test
+	void maskAccountTrimsAndNeverLeaksRawDigitsIntoWithdrawalRequestedEvent() {
+		assertThat(Withdrawal.maskAccount("97043612345678")).isEqualTo("****5678");
+		assertThat(Withdrawal.maskAccount("12345678    ")).isEqualTo("****5678");
+		assertThat(Withdrawal.maskAccount("1234")).isEqualTo("****");
+
+		Withdrawal withdrawal = Withdrawal.request(UUID.randomUUID(), UUID.randomUUID(), Money.vnd(100_000),
+				"97043612345678");
+		WithdrawalRequested emitted = (WithdrawalRequested) withdrawal.uncommittedEvents().getFirst().event();
+		assertThat(emitted.bankAccount()).isEqualTo("****5678").doesNotContain("970436");
 	}
 
 	@Test

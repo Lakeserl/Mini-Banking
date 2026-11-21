@@ -49,7 +49,7 @@ public class WithdrawalCommandHandler {
 		if (existingOpt.isPresent()) {
 			withdrawal = existingOpt.get();
 			if (!withdrawal.walletId().equals(walletId) || !withdrawal.amount().equals(amount)
-					|| !withdrawal.bankAccount().equals(bankAccount)) {
+					|| !withdrawal.bankAccount().equals(Withdrawal.maskAccount(bankAccount))) {
 				throw new ConflictingTransactionException(withdrawalId,
 						"Withdrawal " + withdrawalId + " already exists with different parameters");
 			}
@@ -57,8 +57,8 @@ public class WithdrawalCommandHandler {
 				return WithdrawalStatus.CONFIRMED;
 			}
 			if (withdrawal.status() == WithdrawalStatus.FAILED) {
-				walletCommandHandler.credit(walletId, Withdrawal.reversalTransactionId(withdrawalId), amount,
-						BANK_SETTLEMENT_ACCOUNT, AccountType.SETTLEMENT);
+				walletCommandHandler.creditCompensation(walletId, Withdrawal.reversalTransactionId(withdrawalId),
+						amount, BANK_SETTLEMENT_ACCOUNT, AccountType.SETTLEMENT);
 				return WithdrawalStatus.FAILED;
 			}
 		} else {
@@ -87,8 +87,8 @@ public class WithdrawalCommandHandler {
 			case REJECTED, TIMEOUT -> {
 				withdrawal.fail(payout.reason());
 				withdrawalRepository.save(withdrawal);
-				walletCommandHandler.credit(walletId, Withdrawal.reversalTransactionId(withdrawalId), amount,
-						BANK_SETTLEMENT_ACCOUNT, AccountType.SETTLEMENT);
+				walletCommandHandler.creditCompensation(walletId, Withdrawal.reversalTransactionId(withdrawalId),
+						amount, BANK_SETTLEMENT_ACCOUNT, AccountType.SETTLEMENT);
 				yield WithdrawalStatus.FAILED;
 			}
 		};

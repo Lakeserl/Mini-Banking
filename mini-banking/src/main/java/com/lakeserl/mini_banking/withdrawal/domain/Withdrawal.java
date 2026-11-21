@@ -38,14 +38,23 @@ public final class Withdrawal extends AggregateRoot {
 		return DeterministicIds.v5(REVERSAL_TX_NAMESPACE, withdrawalId + "|reversal");
 	}
 
+	public static String maskAccount(String bankAccount) {
+		Objects.requireNonNull(bankAccount, "bankAccount must not be null");
+		String trimmed = bankAccount.trim();
+		if (trimmed.isEmpty()) {
+			throw new IllegalArgumentException("bankAccount must not be blank");
+		}
+		if (trimmed.length() <= 4) {
+			return "****";
+		}
+		return "****" + trimmed.substring(trimmed.length() - 4);
+	}
+
 	public static Withdrawal request(UUID withdrawalId, UUID walletId, Money amount, String bankAccount) {
 		Objects.requireNonNull(withdrawalId, "withdrawalId must not be null");
 		Objects.requireNonNull(walletId, "walletId must not be null");
 		Objects.requireNonNull(amount, "amount must not be null");
-		Objects.requireNonNull(bankAccount, "bankAccount must not be null");
-		if (bankAccount.isBlank()) {
-			throw new IllegalArgumentException("bankAccount must not be blank");
-		}
+		String maskedAccount = maskAccount(bankAccount);
 		if (amount.currency() != Currency.VND) {
 			throw new IllegalArgumentException("Unsupported withdrawal currency: " + amount.currency());
 		}
@@ -54,7 +63,7 @@ public final class Withdrawal extends AggregateRoot {
 		}
 		Withdrawal withdrawal = new Withdrawal();
 		withdrawal.raise(eventId(withdrawalId, WithdrawalRequested.class),
-				new WithdrawalRequested(withdrawalId, walletId, amount, bankAccount), withdrawalId, null);
+				new WithdrawalRequested(withdrawalId, walletId, amount, maskedAccount), withdrawalId, null);
 		return withdrawal;
 	}
 
