@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import com.lakeserl.mini_banking.query.rebuild.ProjectionRebuildService.RebuildInProgressException;
+import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueAlreadyResolvedException;
+import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueNotFoundException;
 import com.lakeserl.mini_banking.shared.domain.CurrencyMismatchException;
 import com.lakeserl.mini_banking.shared.eventsourcing.OptimisticConcurrencyException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
@@ -74,6 +76,18 @@ public class ApiExceptionHandler {
 	ResponseEntity<ErrorResponse> handleRebuildInProgress(RebuildInProgressException ex) {
 		return ResponseEntity.status(HttpStatus.CONFLICT)
 				.body(new ErrorResponse("REBUILD_IN_PROGRESS", ex.getMessage()));
+	}
+
+	@ExceptionHandler(ReconciliationIssueNotFoundException.class)
+	ResponseEntity<ErrorResponse> handleReconNotFound(ReconciliationIssueNotFoundException ex) {
+		return ResponseEntity.status(HttpStatus.NOT_FOUND)
+				.body(new ErrorResponse("RECONCILIATION_ISSUE_NOT_FOUND", ex.getMessage()));
+	}
+
+	@ExceptionHandler(ReconciliationIssueAlreadyResolvedException.class)
+	ResponseEntity<ErrorResponse> handleReconAlreadyResolved(ReconciliationIssueAlreadyResolvedException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(new ErrorResponse("RECONCILIATION_ISSUE_ALREADY_RESOLVED", ex.getMessage()));
 	}
 
 	@ExceptionHandler(InsufficientFundsException.class)
