@@ -52,6 +52,7 @@ import com.lakeserl.mini_banking.shared.eventsourcing.PostgresSnapshotStore;
 		com.lakeserl.mini_banking.mockbank.InMemoryMockBankGateway.class,
 		com.lakeserl.mini_banking.ledger.projection.LedgerProjector.class,
 		com.lakeserl.mini_banking.query.projection.BalanceProjector.class,
-		com.lakeserl.mini_banking.query.projection.TransactionHistoryProjector.class })
+		com.lakeserl.mini_banking.query.projection.TransactionHistoryProjector.class,
+		com.lakeserl.mini_banking.query.api.QueryRepository.class })
 public @interface PostgresDataTest {
 }
