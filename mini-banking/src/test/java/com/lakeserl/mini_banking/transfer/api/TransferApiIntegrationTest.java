@@ -40,6 +40,7 @@ import tools.jackson.databind.json.JsonMapper;
 		"outbox.relay.enabled=false",
 		"transfer.recovery.enabled=false",
 		"ledger.consumer.enabled=false",
+		"query.consumer.enabled=false",
 		"security.jwt.secret=" + TransferApiIntegrationTest.TEST_JWT_SECRET })
 @AutoConfigureMockMvc
 @ContextConfiguration(initializers = PostgresContainerInitializer.class)

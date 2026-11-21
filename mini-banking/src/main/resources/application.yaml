@@ -45,3 +45,11 @@ ledger:
     enabled: true
     group-id: ledger-projector
     retry-backoff-ms: 1000
+
+query:
+  consumer:
+    enabled: true
+    balance-group-id: balance-projector
+    tx-history-group-id: tx-history-projector
+  rebuild:
+    batch-size: 500
