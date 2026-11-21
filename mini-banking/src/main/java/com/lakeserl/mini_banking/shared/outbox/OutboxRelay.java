@@ -25,7 +25,8 @@ public class OutboxRelay {
 	private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
 
 	private static final String SELECT_PENDING = """
-			SELECT id, event_id, aggregate_id, aggregate_type, event_type, payload::text AS payload, created_at
+			SELECT id, event_id, aggregate_id, aggregate_type, event_type, payload::text AS payload, created_at,
+			       aggregate_version
 			FROM outbox WHERE published_at IS NULL ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED
 			""";
 
@@ -61,7 +62,8 @@ public class OutboxRelay {
 			List<OutboxMessage> pending = jdbc.query(SELECT_PENDING, (rs, i) -> new OutboxMessage(rs.getLong("id"),
 					rs.getObject("event_id", UUID.class), rs.getObject("aggregate_id", UUID.class),
 					rs.getString("aggregate_type"), rs.getString("event_type"), rs.getString("payload"),
-					rs.getObject("created_at", OffsetDateTime.class).toInstant()), batchSize);
+					rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+					rs.getObject("aggregate_version", Long.class)), batchSize);
 			for (OutboxMessage message : pending) {
 				try {
 					publisher.publish(message);

@@ -52,9 +52,9 @@ class OutboxRelayTest {
 		List<Long> ids = new ArrayList<>();
 		for (int i = 0; i < count; i++) {
 			ids.add(jdbc.queryForObject("""
-					INSERT INTO outbox (event_id, aggregate_id, aggregate_type, event_type, payload, created_at)
-					VALUES (?, ?, 'Wallet', 'WalletCredited', '{}'::jsonb, now()) RETURNING id
-					""", Long.class, UUID.randomUUID(), aggregateId));
+					INSERT INTO outbox (event_id, aggregate_id, aggregate_type, event_type, payload, created_at, aggregate_version)
+					VALUES (?, ?, 'Wallet', 'WalletCredited', '{}'::jsonb, now(), ?) RETURNING id
+					""", Long.class, UUID.randomUUID(), aggregateId, (long) (i + 1)));
 		}
 		return ids;
 	}

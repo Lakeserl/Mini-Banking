@@ -36,8 +36,8 @@ public class PostgresEventStore implements EventStore {
 			""";
 
 	private static final String INSERT_OUTBOX = """
-			INSERT INTO outbox (event_id, aggregate_id, aggregate_type, event_type, payload, created_at)
-			VALUES (?, ?, ?, ?, ?::jsonb, ?)
+			INSERT INTO outbox (event_id, aggregate_id, aggregate_type, event_type, payload, created_at, aggregate_version)
+			VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)
 			""";
 
 	private static final String SELECT_COLUMNS = """
@@ -112,7 +112,7 @@ public class PostgresEventStore implements EventStore {
 			handleDuplicateKeyException(e, aggregateId, version, pending.eventId());
 		}
 		jdbc.update(INSERT_OUTBOX, pending.eventId(), aggregateId, aggregateType, pending.event().eventType(), json,
-				occurredAt);
+				occurredAt, version);
 	}
 
 	private void handleDuplicateKeyException(DuplicateKeyException e, UUID aggregateId, long version, UUID eventId) {
@@ -169,5 +169,22 @@ public class PostgresEventStore implements EventStore {
 				"SELECT COALESCE(MAX(version), 0) FROM events WHERE aggregate_id = ?",
 				Long.class, aggregateId);
 		return max != null ? max : 0L;
+	}
+
+	@Override
+	public List<GlobalStoredEvent> loadBatch(long afterGlobalSeq, int limit) {
+		if (afterGlobalSeq < 0) {
+			throw new IllegalArgumentException("afterGlobalSeq must not be negative");
+		}
+		if (limit <= 0) {
+			throw new IllegalArgumentException("limit must be positive");
+		}
+		return jdbc.query(
+				"SELECT global_seq, " + SELECT_COLUMNS
+						+ " FROM events WHERE global_seq > ? ORDER BY global_seq ASC LIMIT ?",
+				(rs, rowNum) -> new GlobalStoredEvent(
+						rs.getLong("global_seq"),
+						storedEventRowMapper.mapRow(rs, rowNum)),
+				afterGlobalSeq, limit);
 	}
 }

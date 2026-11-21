@@ -25,4 +25,12 @@ public interface EventStore {
 
 	/** Returns the highest version persisted for the aggregate, or 0 if none exist. */
 	long latestVersion(UUID aggregateId);
+
+	/**
+	 * Reads up to {@code limit} events across all aggregates with {@code global_seq > afterGlobalSeq},
+	 * ordered by {@code global_seq ASC}. Used for deterministic projection rebuilds.
+	 */
+	default List<GlobalStoredEvent> loadBatch(long afterGlobalSeq, int limit) {
+		throw new UnsupportedOperationException("loadBatch is not implemented by " + getClass().getName());
+	}
 }

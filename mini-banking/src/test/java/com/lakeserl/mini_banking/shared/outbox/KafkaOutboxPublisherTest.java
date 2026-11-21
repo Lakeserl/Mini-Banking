@@ -31,7 +31,7 @@ class KafkaOutboxPublisherTest {
 		UUID aggregateId = UUID.randomUUID();
 		Instant occurredAt = Instant.parse("2026-11-19T10:30:00.123456Z");
 		OutboxMessage msg = new OutboxMessage(1L, eventId, aggregateId, "Wallet", "WalletCredited", "{\"amount\":100}",
-				occurredAt);
+				occurredAt, 7L);
 		when(kafka.send(any(ProducerRecord.class)))
 				.thenReturn(CompletableFuture.completedFuture(mock(SendResult.class)));
 
@@ -50,6 +50,23 @@ class KafkaOutboxPublisherTest {
 				.isEqualTo(eventId.toString());
 		assertThat(new String(record.headers().lastHeader("occurred-at").value(), StandardCharsets.UTF_8))
 				.isEqualTo(occurredAt.toString());
+		assertThat(new String(record.headers().lastHeader("aggregate-version").value(), StandardCharsets.UTF_8))
+				.isEqualTo("7");
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void publishOmitsAggregateVersionHeaderWhenNull() {
+		OutboxMessage msg = new OutboxMessage(4L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}",
+				Instant.parse("2026-11-19T10:30:00Z"));
+		when(kafka.send(any(ProducerRecord.class)))
+				.thenReturn(CompletableFuture.completedFuture(mock(SendResult.class)));
+
+		publisher.publish(msg);
+
+		ArgumentCaptor<ProducerRecord<String, String>> captor = ArgumentCaptor.forClass(ProducerRecord.class);
+		verify(kafka).send(captor.capture());
+		assertThat(captor.getValue().headers().lastHeader("aggregate-version")).isNull();
 	}
 
 	@Test

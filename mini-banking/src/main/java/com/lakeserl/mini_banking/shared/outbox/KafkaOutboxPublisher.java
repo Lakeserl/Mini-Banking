@@ -31,6 +31,10 @@ public class KafkaOutboxPublisher implements OutboxPublisher {
 		record.headers().add("event-type", message.eventType().getBytes(StandardCharsets.UTF_8));
 		record.headers().add("event-id", message.eventId().toString().getBytes(StandardCharsets.UTF_8));
 		record.headers().add("occurred-at", occurredAt.getBytes(StandardCharsets.UTF_8));
+		if (message.aggregateVersion() != null) {
+			record.headers().add("aggregate-version",
+					message.aggregateVersion().toString().getBytes(StandardCharsets.UTF_8));
+		}
 		try {
 			kafka.send(record).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 		} catch (InterruptedException e) {
