@@ -138,6 +138,54 @@ class BankReconciliationServiceUnitTest {
 				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + unresolvedDep), anyString(), eq(NOW));
 	}
 
+	@Test
+	void longBankReferenceProducesDedupeKeyWithin128Chars() {
+		String longRef = "R".repeat(100);
+		Instant txTime = Instant.parse("2026-11-21T04:00:00Z");
+		when(mockBankGateway.getDailyStatement(REPORT_DATE, BankReconciliationService.BANK_ZONE))
+				.thenReturn(List.of(new BankStatementEntry(longRef, "DEPOSIT", UUID.randomUUID(),
+						Money.vnd(100_000), "SUCCESS", txTime)));
+		when(queryRepository.findSettledBankTransactions(any(), any())).thenReturn(List.of());
+		when(queryRepository.findStalePendingDeposits(any())).thenReturn(List.of());
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenAnswer(inv -> {
+			String key = inv.getArgument(1);
+			assertThat(key.length()).isLessThanOrEqualTo(128);
+			return true;
+		});
+
+		assertThat(service.reconcileDate(REPORT_DATE).issuesOpened()).isEqualTo(1);
+	}
+
+	@Test
+	void failingPendingDepositOpensIssueAndContinuesRemainingPendingDeposits() {
+		UUID lockedDep = UUID.randomUUID();
+		UUID okDep = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Instant oldTime = NOW.minusSeconds(600);
+
+		when(mockBankGateway.getDailyStatement(REPORT_DATE, BankReconciliationService.BANK_ZONE))
+				.thenReturn(List.of());
+		when(queryRepository.findSettledBankTransactions(any(), any())).thenReturn(List.of());
+		when(queryRepository.findStalePendingDeposits(NOW.minusSeconds(300)))
+				.thenReturn(List.of(
+						txRow(lockedDep, walletId, "DEPOSIT", 100_000L, "PENDING", "PEND-LOCKED", oldTime),
+						txRow(okDep, walletId, "DEPOSIT", 200_000L, "PENDING", "PEND-NEXT", oldTime)));
+		when(mockBankGateway.findTransaction("PEND-LOCKED")).thenReturn(Optional.of(
+				new BankTransaction("PEND-LOCKED", "DEPOSIT", lockedDep, Money.vnd(100_000), "SUCCESS", null, oldTime)));
+		when(mockBankGateway.findTransaction("PEND-NEXT")).thenReturn(Optional.of(
+				new BankTransaction("PEND-NEXT", "DEPOSIT", okDep, Money.vnd(200_000), "SUCCESS", null, oldTime)));
+		when(depositCommandHandler.deposit(lockedDep, walletId, Money.vnd(100_000), "PEND-LOCKED"))
+				.thenThrow(new IllegalStateException("wallet locked"));
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
+
+		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
+
+		assertThat(result.issuesOpened()).isEqualTo(1);
+		verify(depositCommandHandler).deposit(okDep, walletId, Money.vnd(200_000), "PEND-NEXT");
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
+				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + lockedDep), anyString(), eq(NOW));
+	}
+
 	private static TransactionHistoryRow txRow(UUID txId, UUID walletId, String txType, long amount,
 			String status, String bankRef, Instant occurredAt) {
 		return new TransactionHistoryRow(1L, txId, walletId, txType, "DEPOSIT".equals(txType) ? "IN" : "OUT",

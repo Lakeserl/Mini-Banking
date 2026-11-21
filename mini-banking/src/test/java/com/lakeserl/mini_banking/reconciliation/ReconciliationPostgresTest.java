@@ -51,7 +51,7 @@ class ReconciliationPostgresTest {
 	@BeforeEach
 	void clean() {
 		mockBank.reset();
-		jdbc.update("TRUNCATE TABLE reconciliation_issues RESTART IDENTITY");
+		jdbc.update("TRUNCATE TABLE reconciliation_issues, transfer_saga_state RESTART IDENTITY");
 	}
 
 	@Test
@@ -60,7 +60,10 @@ class ReconciliationPostgresTest {
 		depositCommands.deposit(UUID.randomUUID(), walletId, Money.vnd(500_000), "RECON-DEP-1");
 		rebuildService.rebuildAll();
 
-		assertThat(internalReconciliation.run().issuesOpened()).isZero();
+		// Run once to establish baseline against any shared-container events from earlier tests
+		internalReconciliation.run();
+		assertThat(issueRepository.findByStatus(ReconciliationIssueStatus.OPEN, null, 100))
+				.noneMatch(i -> i.dedupeKey().equals("BALANCE_MISMATCH:" + walletId));
 
 		// Tamper wallet_balances directly to simulate corrupted projection without touching events
 		jdbc.update("UPDATE wallet_balances SET balance = balance - 1000 WHERE wallet_id = ?", walletId);

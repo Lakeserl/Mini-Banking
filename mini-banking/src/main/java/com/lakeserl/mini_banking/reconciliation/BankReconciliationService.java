@@ -1,11 +1,15 @@
 package com.lakeserl.mini_banking.reconciliation;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -172,8 +176,22 @@ public class BankReconciliationService {
 					? Optional.empty()
 					: mockBankGateway.findTransaction(ref);
 			if (bankTx.isPresent() && ("SUCCESS".equals(bankTx.get().status()) || "REJECTED".equals(bankTx.get().status()))) {
-				depositCommandHandler.deposit(pending.transactionId(), pending.walletId(),
-						new Money(pending.amount(), Currency.valueOf(pending.currency())), ref);
+				try {
+					depositCommandHandler.deposit(pending.transactionId(), pending.walletId(),
+							new Money(pending.amount(), Currency.valueOf(pending.currency())), ref);
+				} catch (RuntimeException ex) {
+					log.warn("Failed to settle stale pending deposit {}; opening reconciliation issue",
+							pending.transactionId(), ex);
+					if (openIssue("BANK_MISMATCH:PENDING_DEPOSIT:" + pending.transactionId(),
+							Map.of("kind", "PENDING_DEPOSIT_SETTLE_FAILED",
+									"depositId", pending.transactionId().toString(),
+									"walletId", pending.walletId().toString(),
+									"bankReference", ref != null ? ref : "",
+									"error", ex.getClass().getSimpleName()),
+							checkedAt)) {
+						opened++;
+					}
+				}
 			} else {
 				if (openIssue("BANK_MISMATCH:PENDING_DEPOSIT:" + pending.transactionId(),
 						Map.of("kind", "PENDING_DEPOSIT_UNRESOLVED",
@@ -190,6 +208,20 @@ public class BankReconciliationService {
 
 	private boolean openIssue(String dedupeKey, Map<String, Object> details, Instant detectedAt) {
 		String json = mapper.writeValueAsString(details);
-		return issueRepository.openIfAbsent(ReconciliationIssueType.BANK_MISMATCH, dedupeKey, json, detectedAt);
+		return issueRepository.openIfAbsent(ReconciliationIssueType.BANK_MISMATCH, boundDedupeKey(dedupeKey), json,
+				detectedAt);
+	}
+
+	private static String boundDedupeKey(String dedupeKey) {
+		if (dedupeKey.length() <= 128) {
+			return dedupeKey;
+		}
+		try {
+			MessageDigest digest = MessageDigest.getInstance("SHA-256");
+			String hash = HexFormat.of().formatHex(digest.digest(dedupeKey.getBytes(StandardCharsets.UTF_8)));
+			return dedupeKey.substring(0, 63) + ":" + hash;
+		} catch (NoSuchAlgorithmException e) {
+			throw new IllegalStateException("SHA-256 unavailable", e);
+		}
 	}
 }

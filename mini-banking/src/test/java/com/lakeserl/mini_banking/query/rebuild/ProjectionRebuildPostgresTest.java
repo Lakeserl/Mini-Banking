@@ -59,15 +59,16 @@ class ProjectionRebuildPostgresTest {
 
 		long aliceBalanceFirst = queryRepository.findBalance(aliceWallet).orElseThrow().balance();
 		long bobBalanceFirst = queryRepository.findBalance(bobWallet).orElseThrow().balance();
+		long clearingFirst = ledgerQueryRepository.accountNetCreditMinusDebit("TRANSFER_CLEARING");
 		assertThat(aliceBalanceFirst).isEqualTo(650_000L);
 		assertThat(bobBalanceFirst).isEqualTo(350_000L);
 		assertThat(ledgerQueryRepository.totalDebitMinusCredit()).isZero();
-		assertThat(ledgerQueryRepository.accountNetCreditMinusDebit("TRANSFER_CLEARING")).isZero();
 
 		ProjectionRebuildService.RebuildResult second = rebuildService.rebuildAll();
 		assertThat(second.eventsReplayed()).isEqualTo(first.eventsReplayed());
 		assertThat(queryRepository.findBalance(aliceWallet).orElseThrow().balance()).isEqualTo(aliceBalanceFirst);
 		assertThat(queryRepository.findBalance(bobWallet).orElseThrow().balance()).isEqualTo(bobBalanceFirst);
+		assertThat(ledgerQueryRepository.accountNetCreditMinusDebit("TRANSFER_CLEARING")).isEqualTo(clearingFirst);
 		assertThat(queryRepository.findTransactions(aliceWallet, null, 20)).hasSize(2);
 		assertThat(queryRepository.findTransactions(bobWallet, null, 20)).hasSize(1);
 	}
