@@ -9,6 +9,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import com.lakeserl.mini_banking.query.rebuild.ProjectionRebuildService.RebuildInProgressException;
 import com.lakeserl.mini_banking.shared.domain.CurrencyMismatchException;
 import com.lakeserl.mini_banking.shared.eventsourcing.OptimisticConcurrencyException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
@@ -67,6 +68,12 @@ public class ApiExceptionHandler {
 	ResponseEntity<ErrorResponse> handleConcurrency(OptimisticConcurrencyException ex) {
 		return ResponseEntity.status(HttpStatus.CONFLICT)
 				.body(new ErrorResponse("CONCURRENCY_CONFLICT", ex.getMessage()));
+	}
+
+	@ExceptionHandler(RebuildInProgressException.class)
+	ResponseEntity<ErrorResponse> handleRebuildInProgress(RebuildInProgressException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(new ErrorResponse("REBUILD_IN_PROGRESS", ex.getMessage()));
 	}
 
 	@ExceptionHandler(InsufficientFundsException.class)

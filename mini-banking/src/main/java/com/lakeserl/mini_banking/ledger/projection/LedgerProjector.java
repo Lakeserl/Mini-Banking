@@ -70,6 +70,10 @@ public class LedgerProjector {
 		this(jdbc, tx, DEFAULT_CONSUMER_GROUP);
 	}
 
+	public String consumerGroup() {
+		return consumerGroup;
+	}
+
 	/**
 	 * Applies a single domain event to the ledger projection atomically.
 	 *
