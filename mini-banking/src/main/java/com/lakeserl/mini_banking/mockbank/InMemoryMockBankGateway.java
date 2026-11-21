@@ -1,11 +1,16 @@
 package com.lakeserl.mini_banking.mockbank;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.springframework.stereotype.Component;
 
@@ -17,6 +22,7 @@ public class InMemoryMockBankGateway implements MockBankGateway {
 	private final Map<String, VerificationStatus> presetDepositStatuses = new ConcurrentHashMap<>();
 	private final Map<UUID, PayoutStatus> presetPayoutStatuses = new ConcurrentHashMap<>();
 	private final Map<String, BankTransaction> transactions = new ConcurrentHashMap<>();
+	private final List<BankStatementEntry> injectedStatementEntries = new CopyOnWriteArrayList<>();
 
 	public void presetDeposit(String bankReference, VerificationStatus status) {
 		presetDepositStatuses.put(bankReference, status);
@@ -26,10 +32,16 @@ public class InMemoryMockBankGateway implements MockBankGateway {
 		presetPayoutStatuses.put(withdrawalId, status);
 	}
 
+	/** Test helper to simulate extra, duplicate, or mismatched rows in the bank's daily statement. */
+	public void addStatementEntry(BankStatementEntry entry) {
+		injectedStatementEntries.add(Objects.requireNonNull(entry, "entry must not be null"));
+	}
+
 	public void reset() {
 		presetDepositStatuses.clear();
 		presetPayoutStatuses.clear();
 		transactions.clear();
+		injectedStatementEntries.clear();
 	}
 
 	@Override
@@ -72,5 +84,24 @@ public class InMemoryMockBankGateway implements MockBankGateway {
 	public Optional<BankTransaction> findTransaction(String bankReference) {
 		Objects.requireNonNull(bankReference, "bankReference must not be null");
 		return Optional.ofNullable(transactions.get(bankReference));
+	}
+
+	@Override
+	public List<BankStatementEntry> getDailyStatement(LocalDate date, ZoneId zone) {
+		Objects.requireNonNull(date, "date must not be null");
+		Objects.requireNonNull(zone, "zone must not be null");
+		List<BankStatementEntry> result = new ArrayList<>();
+		for (BankTransaction tx : transactions.values()) {
+			if (tx.recordedAt().atZone(zone).toLocalDate().equals(date)) {
+				result.add(new BankStatementEntry(tx.bankReference(), tx.type(), tx.transactionId(),
+						tx.amount(), tx.status(), tx.recordedAt()));
+			}
+		}
+		for (BankStatementEntry extra : injectedStatementEntries) {
+			if (extra.recordedAt().atZone(zone).toLocalDate().equals(date)) {
+				result.add(extra);
+			}
+		}
+		return result;
 	}
 }

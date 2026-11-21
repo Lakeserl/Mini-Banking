@@ -77,6 +77,28 @@ public class QueryRepository {
 			ORDER BY report_date DESC, currency ASC
 			""";
 
+	private static final String SELECT_SETTLED_BANK_TX_SQL = """
+			SELECT id, transaction_id, wallet_id, tx_type, direction, amount, currency, status,
+			       counterpart_wallet_id, counterpart_label, bank_reference, original_transfer_id,
+			       failure_reason, occurred_at, updated_at
+			FROM transaction_history
+			WHERE tx_type IN ('DEPOSIT', 'WITHDRAWAL')
+			  AND status = 'CONFIRMED'
+			  AND updated_at >= ? AND updated_at < ?
+			ORDER BY updated_at ASC, id ASC
+			""";
+
+	private static final String SELECT_STALE_PENDING_DEPOSITS_SQL = """
+			SELECT id, transaction_id, wallet_id, tx_type, direction, amount, currency, status,
+			       counterpart_wallet_id, counterpart_label, bank_reference, original_transfer_id,
+			       failure_reason, occurred_at, updated_at
+			FROM transaction_history
+			WHERE tx_type = 'DEPOSIT'
+			  AND status = 'PENDING'
+			  AND occurred_at <= ?
+			ORDER BY occurred_at ASC, id ASC
+			""";
+
 	private static final RowMapper<WalletBalanceRow> BALANCE_MAPPER = (rs, i) -> new WalletBalanceRow(
 			rs.getObject("wallet_id", UUID.class),
 			rs.getObject("owner_id", UUID.class),
@@ -143,5 +165,19 @@ public class QueryRepository {
 		Objects.requireNonNull(from, "from");
 		Objects.requireNonNull(to, "to");
 		return jdbc.query(SELECT_DAILY_REPORTS_SQL, DAILY_MAPPER, Date.valueOf(from), Date.valueOf(to));
+	}
+
+	public List<TransactionHistoryRow> findSettledBankTransactions(Instant fromInclusive, Instant toExclusive) {
+		Objects.requireNonNull(fromInclusive, "fromInclusive");
+		Objects.requireNonNull(toExclusive, "toExclusive");
+		return jdbc.query(SELECT_SETTLED_BANK_TX_SQL, TX_MAPPER,
+				OffsetDateTime.ofInstant(fromInclusive, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(toExclusive, ZoneOffset.UTC));
+	}
+
+	public List<TransactionHistoryRow> findStalePendingDeposits(Instant olderThan) {
+		Objects.requireNonNull(olderThan, "olderThan");
+		return jdbc.query(SELECT_STALE_PENDING_DEPOSITS_SQL, TX_MAPPER,
+				OffsetDateTime.ofInstant(olderThan, ZoneOffset.UTC));
 	}
 }

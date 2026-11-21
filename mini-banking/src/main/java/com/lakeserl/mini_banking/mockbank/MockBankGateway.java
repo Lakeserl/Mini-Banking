@@ -1,6 +1,9 @@
 package com.lakeserl.mini_banking.mockbank;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -52,9 +55,15 @@ public interface MockBankGateway {
 			String reason, Instant recordedAt) {
 	}
 
+	record BankStatementEntry(String bankReference, String type, UUID transactionId, Money amount, String status,
+			Instant recordedAt) {
+	}
+
 	DepositVerificationResult verifyDeposit(UUID depositId, Money amount, String bankReference);
 
 	PayoutResult payout(UUID withdrawalId, Money amount, String bankAccount);
 
 	Optional<BankTransaction> findTransaction(String bankReference);
+
+	List<BankStatementEntry> getDailyStatement(LocalDate date, ZoneId zone);
 }
