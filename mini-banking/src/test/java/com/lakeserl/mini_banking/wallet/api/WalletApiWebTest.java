@@ -242,12 +242,18 @@ class WalletApiWebTest {
 
 		mockMvc.perform(get("/api/mock-bank/transactions/{ref}", "REF-OK")
 						.with(jwt().jwt(j -> j.subject(UUID.randomUUID().toString()))))
+				.andExpect(status().isForbidden());
+
+		mockMvc.perform(get("/api/mock-bank/transactions/{ref}", "REF-OK")
+						.with(jwt().jwt(j -> j.subject(UUID.randomUUID().toString()).claim("roles", List.of("ADMIN")))
+								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.bankReference").value("REF-OK"))
 				.andExpect(jsonPath("$.status").value("SUCCESS"));
 
 		mockMvc.perform(get("/api/mock-bank/transactions/{ref}", "UNKNOWN")
-						.with(jwt().jwt(j -> j.subject(UUID.randomUUID().toString()))))
+						.with(jwt().jwt(j -> j.subject(UUID.randomUUID().toString()).claim("roles", List.of("ADMIN")))
+								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
 				.andExpect(status().isNotFound());
 	}
 }

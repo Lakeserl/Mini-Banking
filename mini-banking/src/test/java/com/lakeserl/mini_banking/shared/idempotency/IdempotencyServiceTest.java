@@ -67,4 +67,26 @@ class IdempotencyServiceTest {
 
 		assertThat(service.begin(userId, key, hash)).isInstanceOf(Decision.Acquired.class);
 	}
+
+	@Test
+	void staleInProgressKeyIsReclaimedAfterLeaseExpiryAndCleanupRemovesExpiredRows() {
+		UUID userId = UUID.randomUUID();
+		String staleKey = "stale-in-progress-" + UUID.randomUUID();
+		String expiredKey = "expired-cleanup-" + UUID.randomUUID();
+		String hash = IdempotencyService.sha256("POST", "/api/transfers", "{}".getBytes());
+
+		assertThat(service.begin(userId, staleKey, hash)).isInstanceOf(Decision.Acquired.class);
+		assertThat(service.begin(userId, staleKey, hash)).isInstanceOf(Decision.InProgress.class);
+		jdbc.update("UPDATE idempotency_keys SET created_at = now() - interval '5 minutes' WHERE user_id = ? AND idempotency_key = ?",
+				userId, staleKey);
+
+		assertThat(service.begin(userId, staleKey, hash)).isInstanceOf(Decision.Acquired.class);
+
+		assertThat(service.begin(userId, expiredKey, hash)).isInstanceOf(Decision.Acquired.class);
+		service.complete(userId, expiredKey, 200, "{\"ok\":true}");
+		jdbc.update("UPDATE idempotency_keys SET expires_at = now() - interval '1 minute' WHERE user_id = ? AND idempotency_key = ?",
+				userId, expiredKey);
+
+		assertThat(service.cleanupExpired()).isGreaterThanOrEqualTo(1);
+	}
 }

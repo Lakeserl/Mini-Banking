@@ -2,9 +2,12 @@ package com.lakeserl.mini_banking.shared.idempotency;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -24,7 +27,10 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ContentCachingResponseWrapper;
 
+import com.lakeserl.mini_banking.shared.api.ApiExceptionHandler.ErrorResponse;
 import com.lakeserl.mini_banking.shared.idempotency.IdempotencyService.Decision;
+
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Enforces {@code Idempotency-Key} header on money-moving endpoints (ADR-010).
@@ -33,11 +39,14 @@ import com.lakeserl.mini_banking.shared.idempotency.IdempotencyService.Decision;
 public class IdempotencyFilter extends OncePerRequestFilter {
 
 	public static final String HEADER = "Idempotency-Key";
+	public static final int MAX_BODY_BYTES = 64 * 1024;
 	private static final int MAX_KEY_LENGTH = 100;
+	private static final int PAYLOAD_TOO_LARGE_STATUS = 413;
 	private static final Pattern IDEMPOTENT_PATH = Pattern
 			.compile("^/api/(wallets/[^/]+/(deposit|withdraw)|transfers(/[^/]+/refund)?)$");
 
 	private final IdempotencyService idempotencyService;
+	private final JsonMapper mapper = JsonMapper.builder().build();
 
 	public IdempotencyFilter(IdempotencyService idempotencyService) {
 		this.idempotencyService = Objects.requireNonNull(idempotencyService, "idempotencyService must not be null");
@@ -74,7 +83,20 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 			return;
 		}
 
-		CachedBodyRequest cachedRequest = new CachedBodyRequest(request);
+		if (request.getContentLengthLong() > MAX_BODY_BYTES) {
+			writeJsonError(response, PAYLOAD_TOO_LARGE_STATUS, "PAYLOAD_TOO_LARGE",
+					"Request body exceeds maximum allowed size of " + MAX_BODY_BYTES + " bytes");
+			return;
+		}
+
+		CachedBodyRequest cachedRequest;
+		try {
+			cachedRequest = new CachedBodyRequest(request, MAX_BODY_BYTES);
+		} catch (PayloadTooLargeException ex) {
+			writeJsonError(response, PAYLOAD_TOO_LARGE_STATUS, "PAYLOAD_TOO_LARGE",
+					"Request body exceeds maximum allowed size of " + MAX_BODY_BYTES + " bytes");
+			return;
+		}
 		String hash = IdempotencyService.sha256(request.getMethod(), request.getRequestURI(), cachedRequest.body());
 
 		Decision decision = idempotencyService.begin(userId, key, hash);
@@ -93,7 +115,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 				response.setCharacterEncoding(StandardCharsets.UTF_8.name());
 				response.getWriter().write(body);
 			}
-			case Decision.Acquired() -> {
+			case Decision.Acquired(OffsetDateTime acquiredAt) -> {
 				ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
 				boolean completed = false;
 				try {
@@ -101,12 +123,20 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 					int status = wrappedResponse.getStatus();
 					if (status >= 200 && status < 300) {
 						String body = new String(wrappedResponse.getContentAsByteArray(), StandardCharsets.UTF_8);
-						idempotencyService.complete(userId, key, status, body);
+						if (acquiredAt == null) {
+							idempotencyService.complete(userId, key, status, body);
+						} else {
+							idempotencyService.complete(userId, key, acquiredAt, status, body);
+						}
 						completed = true;
 					}
 				} finally {
 					if (!completed) {
-						idempotencyService.release(userId, key);
+						if (acquiredAt == null) {
+							idempotencyService.release(userId, key);
+						} else {
+							idempotencyService.release(userId, key, acquiredAt);
+						}
 					}
 					wrappedResponse.copyBodyToResponse();
 				}
@@ -119,16 +149,34 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 		response.setStatus(status);
 		response.setContentType(MediaType.APPLICATION_JSON_VALUE);
 		response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-		response.getWriter().write("{\"error\":\"" + error + "\",\"message\":\"" + message + "\"}");
+		response.getWriter().write(mapper.writeValueAsString(new ErrorResponse(error, message)));
+	}
+
+	private static final class PayloadTooLargeException extends RuntimeException {
 	}
 
 	private static final class CachedBodyRequest extends HttpServletRequestWrapper {
 
 		private final byte[] body;
 
-		CachedBodyRequest(HttpServletRequest request) throws IOException {
+		CachedBodyRequest(HttpServletRequest request, int maxBytes) throws IOException {
 			super(request);
-			this.body = request.getInputStream().readAllBytes();
+			this.body = readBounded(request.getInputStream(), maxBytes);
+		}
+
+		private static byte[] readBounded(InputStream in, int maxBytes) throws IOException {
+			ByteArrayOutputStream out = new ByteArrayOutputStream();
+			byte[] buffer = new byte[4096];
+			int total = 0;
+			int read;
+			while ((read = in.read(buffer)) != -1) {
+				total += read;
+				if (total > maxBytes) {
+					throw new PayloadTooLargeException();
+				}
+				out.write(buffer, 0, read);
+			}
+			return out.toByteArray();
 		}
 
 		byte[] body() {

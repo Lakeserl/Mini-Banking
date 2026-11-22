@@ -26,6 +26,17 @@ class ReconciliationSchemaUnitTest {
 		assertThat(sql).contains("idx_recon_status_detected");
 	}
 
+	@Test
+	void v8MigrationDefinesPartialIndexesForBankReconciliationAndIdempotencyCleanup() throws IOException {
+		String sql = readMigration("db/migration/V8__reconciliation_and_idempotency_indexes.sql");
+
+		assertThat(sql).contains("idx_tx_history_settled_bank");
+		assertThat(sql).contains("WHERE tx_type IN ('DEPOSIT', 'WITHDRAWAL') AND status = 'CONFIRMED'");
+		assertThat(sql).contains("idx_tx_history_pending_deposit");
+		assertThat(sql).contains("WHERE tx_type = 'DEPOSIT' AND status = 'PENDING'");
+		assertThat(sql).contains("idx_idempotency_keys_expires_at");
+	}
+
 	private static String readMigration(String resourcePath) throws IOException {
 		try (InputStream in = ReconciliationSchemaUnitTest.class.getClassLoader().getResourceAsStream(resourcePath)) {
 			assertThat(in).as("Migration resource %s must exist", resourcePath).isNotNull();

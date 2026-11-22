@@ -49,6 +49,21 @@ public class QueryRepository {
 			ORDER BY wallet_id ASC
 			""";
 
+	private static final String SELECT_BALANCES_FIRST_BATCH_SQL = """
+			SELECT wallet_id, owner_id, currency, balance, status, aggregate_version, updated_at
+			FROM wallet_balances
+			ORDER BY wallet_id ASC
+			LIMIT ?
+			""";
+
+	private static final String SELECT_BALANCES_AFTER_BATCH_SQL = """
+			SELECT wallet_id, owner_id, currency, balance, status, aggregate_version, updated_at
+			FROM wallet_balances
+			WHERE wallet_id > ?
+			ORDER BY wallet_id ASC
+			LIMIT ?
+			""";
+
 	private static final String SELECT_TX_FIRST_PAGE_SQL = """
 			SELECT id, transaction_id, wallet_id, tx_type, direction, amount, currency, status,
 			       counterpart_wallet_id, counterpart_label, bank_reference, original_transfer_id,
@@ -147,6 +162,16 @@ public class QueryRepository {
 
 	public List<WalletBalanceRow> findAllBalances() {
 		return jdbc.query(SELECT_ALL_BALANCES_SQL, BALANCE_MAPPER);
+	}
+
+	public List<WalletBalanceRow> findBalancesBatch(UUID afterWalletId, int limit) {
+		if (limit <= 0) {
+			throw new IllegalArgumentException("limit must be positive");
+		}
+		if (afterWalletId == null) {
+			return jdbc.query(SELECT_BALANCES_FIRST_BATCH_SQL, BALANCE_MAPPER, limit);
+		}
+		return jdbc.query(SELECT_BALANCES_AFTER_BATCH_SQL, BALANCE_MAPPER, afterWalletId, limit);
 	}
 
 	public List<TransactionHistoryRow> findTransactions(UUID walletId, Cursor cursor, int fetchSize) {

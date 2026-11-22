@@ -139,9 +139,13 @@ class WalletApiIntegrationTest {
 						.content("{\"amount\":999000,\"currency\":\"VND\",\"bankReference\":\"REF-E2E-1\"}"))
 				.andExpect(status().is(422));
 
-		// 5. Mock bank verification endpoint returns recorded deposit
+		// 5. Mock bank verification endpoint requires ROLE_ADMIN and returns recorded deposit
 		mockMvc.perform(get("/api/mock-bank/transactions/{ref}", "REF-E2E-1")
 						.header(HttpHeaders.AUTHORIZATION, ownerToken))
+				.andExpect(status().isForbidden());
+
+		mockMvc.perform(get("/api/mock-bank/transactions/{ref}", "REF-E2E-1")
+						.header(HttpHeaders.AUTHORIZATION, adminToken))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("SUCCESS"));
 

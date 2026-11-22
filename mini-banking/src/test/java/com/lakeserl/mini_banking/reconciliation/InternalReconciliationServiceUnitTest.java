@@ -66,8 +66,8 @@ class InternalReconciliationServiceUnitTest {
 		when(ledgerQuery.accountNetCreditMinusDebit("TRANSFER_CLEARING")).thenReturn(100_000L);
 		when(sagaStateStore.sumInFlightClearingAmount()).thenReturn(100_000L);
 		// Projection is at version 1 (lagging behind replayed version 2) -> must NOT raise false positive
-		when(queryRepository.findAllBalances()).thenReturn(List.of(
-				new WalletBalanceRow(walletId, ownerId, "VND", 0L, "ACTIVE", 1L, NOW)));
+		when(queryRepository.findBalancesBatch(null, InternalReconciliationService.DEFAULT_WALLET_BATCH_SIZE))
+				.thenReturn(List.of(new WalletBalanceRow(walletId, ownerId, "VND", 0L, "ACTIVE", 1L, NOW)));
 		when(walletRepository.load(walletId)).thenReturn(Optional.of(replayed));
 
 		InternalReconciliationService.ReconciliationRunResult result = service.run();
@@ -91,8 +91,8 @@ class InternalReconciliationServiceUnitTest {
 		when(ledgerQuery.accountNetCreditMinusDebit("TRANSFER_CLEARING")).thenReturn(50_000L);
 		when(sagaStateStore.sumInFlightClearingAmount()).thenReturn(0L);
 		// Same version (2 == 2) but projected balance differs from replayed balance
-		when(queryRepository.findAllBalances()).thenReturn(List.of(
-				new WalletBalanceRow(walletId, ownerId, "VND", 400_000L, "ACTIVE", 2L, NOW)));
+		when(queryRepository.findBalancesBatch(null, InternalReconciliationService.DEFAULT_WALLET_BATCH_SIZE))
+				.thenReturn(List.of(new WalletBalanceRow(walletId, ownerId, "VND", 400_000L, "ACTIVE", 2L, NOW)));
 		when(walletRepository.load(walletId)).thenReturn(Optional.of(replayed));
 		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
 
@@ -108,5 +108,50 @@ class InternalReconciliationServiceUnitTest {
 		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BALANCE_MISMATCH),
 				eq("BALANCE_MISMATCH:" + walletId), anyString(), eq(NOW));
 		verify(walletRepository, never()).save(any());
+	}
+
+	@Test
+	void paginatesWalletBalanceVerificationAcrossMultipleBatches() {
+		Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+		InternalReconciliationService pagedService = new InternalReconciliationService(
+				ledgerQuery, sagaStateStore, queryRepository, walletRepository, issueRepository, clock, false, 2);
+
+		UUID w1 = UUID.fromString("00000000-0000-0000-0000-000000000001");
+		UUID w2 = UUID.fromString("00000000-0000-0000-0000-000000000002");
+		UUID w3 = UUID.fromString("00000000-0000-0000-0000-000000000003");
+		UUID owner = UUID.randomUUID();
+
+		Wallet wallet1 = Wallet.open(w1, owner, Currency.VND);
+		wallet1.markCommitted();
+		Wallet wallet2 = Wallet.open(w2, owner, Currency.VND);
+		wallet2.markCommitted();
+		Wallet wallet3 = Wallet.open(w3, owner, Currency.VND);
+		wallet3.credit(UUID.randomUUID(), Money.vnd(100_000), "BANK_SETTLEMENT", AccountType.SETTLEMENT);
+		wallet3.markCommitted();
+
+		when(ledgerQuery.totalDebitMinusCredit()).thenReturn(0L);
+		when(ledgerQuery.unbalancedTransactions()).thenReturn(List.of());
+		when(ledgerQuery.accountNetCreditMinusDebit("TRANSFER_CLEARING")).thenReturn(0L);
+		when(sagaStateStore.sumInFlightClearingAmount()).thenReturn(0L);
+
+		when(queryRepository.findBalancesBatch(null, 2)).thenReturn(List.of(
+				new WalletBalanceRow(w1, owner, "VND", 0L, "ACTIVE", 1L, NOW),
+				new WalletBalanceRow(w2, owner, "VND", 0L, "ACTIVE", 1L, NOW)));
+		when(queryRepository.findBalancesBatch(w2, 2)).thenReturn(List.of(
+				new WalletBalanceRow(w3, owner, "VND", 99_000L, "ACTIVE", 2L, NOW)));
+
+		when(walletRepository.load(w1)).thenReturn(Optional.of(wallet1));
+		when(walletRepository.load(w2)).thenReturn(Optional.of(wallet2));
+		when(walletRepository.load(w3)).thenReturn(Optional.of(wallet3));
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
+
+		InternalReconciliationService.ReconciliationRunResult result = pagedService.run();
+
+		assertThat(result.issuesOpened()).isEqualTo(1);
+		verify(queryRepository, never()).findAllBalances();
+		verify(queryRepository).findBalancesBatch(null, 2);
+		verify(queryRepository).findBalancesBatch(w2, 2);
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BALANCE_MISMATCH),
+				eq("BALANCE_MISMATCH:" + w3), anyString(), eq(NOW));
 	}
 }

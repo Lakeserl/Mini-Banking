@@ -20,7 +20,9 @@ import com.lakeserl.mini_banking.mockbank.MockBankGateway;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway.PayoutResult;
 import com.lakeserl.mini_banking.shared.domain.AccountType;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.eventsourcing.EventStore;
 import com.lakeserl.mini_banking.wallet.command.WalletCommandHandler;
+import com.lakeserl.mini_banking.wallet.domain.Wallet;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.ConflictingTransactionException;
 import com.lakeserl.mini_banking.withdrawal.domain.Withdrawal;
 import com.lakeserl.mini_banking.withdrawal.domain.WithdrawalStatus;
@@ -31,6 +33,7 @@ class WithdrawalCommandHandlerUnitTest {
 	private WithdrawalRepository withdrawalRepository;
 	private WalletCommandHandler walletCommandHandler;
 	private MockBankGateway mockBankGateway;
+	private EventStore eventStore;
 	private WithdrawalCommandHandler handler;
 
 	@BeforeEach
@@ -38,7 +41,8 @@ class WithdrawalCommandHandlerUnitTest {
 		withdrawalRepository = mock(WithdrawalRepository.class);
 		walletCommandHandler = mock(WalletCommandHandler.class);
 		mockBankGateway = mock(MockBankGateway.class);
-		handler = new WithdrawalCommandHandler(withdrawalRepository, walletCommandHandler, mockBankGateway);
+		eventStore = mock(EventStore.class);
+		handler = new WithdrawalCommandHandler(withdrawalRepository, walletCommandHandler, mockBankGateway, eventStore);
 	}
 
 	@Test
@@ -83,5 +87,65 @@ class WithdrawalCommandHandlerUnitTest {
 
 		assertThatThrownBy(() -> handler.withdraw(withdrawalId, walletId, amount, "97043612349999"))
 				.isInstanceOf(ConflictingTransactionException.class);
+	}
+
+	@Test
+	void initialWithdrawalSaveFailureAfterDebitCompensatesWalletAndRethrows() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(300_000);
+
+		when(withdrawalRepository.load(withdrawalId)).thenReturn(Optional.empty());
+		org.mockito.Mockito.doThrow(new RuntimeException("db connection lost"))
+				.when(withdrawalRepository).save(any(Withdrawal.class));
+
+		assertThatThrownBy(() -> handler.withdraw(withdrawalId, walletId, amount, "97043612345678"))
+				.isInstanceOf(RuntimeException.class)
+				.hasMessageContaining("db connection lost");
+
+		verify(walletCommandHandler).debit(
+				eq(walletId), eq(withdrawalId), eq(amount),
+				eq(WithdrawalCommandHandler.BANK_SETTLEMENT_ACCOUNT), eq(AccountType.SETTLEMENT));
+		verify(walletCommandHandler).creditCompensation(
+				eq(walletId), eq(Withdrawal.reversalTransactionId(withdrawalId)), eq(amount),
+				eq(WithdrawalCommandHandler.BANK_SETTLEMENT_ACCOUNT), eq(AccountType.SETTLEMENT));
+		verify(mockBankGateway, never()).payout(any(), any(), any());
+	}
+
+	@Test
+	void retryAfterSaveFailureCompensationReturnsFailedWithoutCallingBankPayout() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(300_000);
+		UUID reversalEventId = Wallet.creditEventId(Withdrawal.reversalTransactionId(withdrawalId), walletId);
+
+		when(withdrawalRepository.load(withdrawalId)).thenReturn(Optional.empty());
+		when(eventStore.contains(reversalEventId)).thenReturn(true);
+
+		WithdrawalStatus status = handler.withdraw(withdrawalId, walletId, amount, "97043612345678");
+
+		assertThat(status).isEqualTo(WithdrawalStatus.FAILED);
+		verify(walletCommandHandler, never()).debit(any(), any(), any(), any(), any());
+		verify(mockBankGateway, never()).payout(any(), any(), any());
+	}
+
+	@Test
+	void saveFailureWhenPersistenceVerificationLoadAlsoFailsDoesNotCompensate() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(300_000);
+
+		when(withdrawalRepository.load(withdrawalId))
+				.thenReturn(Optional.empty())
+				.thenThrow(new RuntimeException("db still down"));
+		org.mockito.Mockito.doThrow(new RuntimeException("save timeout"))
+				.when(withdrawalRepository).save(any(Withdrawal.class));
+
+		assertThatThrownBy(() -> handler.withdraw(withdrawalId, walletId, amount, "97043612345678"))
+				.isInstanceOf(RuntimeException.class)
+				.hasMessageContaining("save timeout");
+
+		verify(walletCommandHandler, never()).creditCompensation(any(), any(), any(), any(), any());
+		verify(mockBankGateway, never()).payout(any(), any(), any());
 	}
 }

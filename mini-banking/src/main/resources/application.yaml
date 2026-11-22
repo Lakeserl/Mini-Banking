@@ -24,6 +24,12 @@ outbox:
     poll-interval-ms: 200
     batch-size: 100
 
+idempotency:
+  in-progress-lease-seconds: 120
+  cleanup:
+    enabled: true
+    interval-ms: 3600000
+
 wallet:
   command:
     max-optimistic-retries: 3
@@ -58,6 +64,7 @@ reconciliation:
   internal:
     enabled: true
     interval-ms: 3600000
+    wallet-batch-size: 500
   bank:
     enabled: true
     cron: "0 15 0 * * *"

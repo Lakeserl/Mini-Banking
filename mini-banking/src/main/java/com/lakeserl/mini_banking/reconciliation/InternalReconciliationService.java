@@ -31,6 +31,7 @@ import tools.jackson.databind.json.JsonMapper;
 @Service
 public class InternalReconciliationService {
 
+	public static final int DEFAULT_WALLET_BATCH_SIZE = 500;
 	private static final Logger log = LoggerFactory.getLogger(InternalReconciliationService.class);
 	private static final String CLEARING_ACCOUNT = "TRANSFER_CLEARING";
 
@@ -44,6 +45,7 @@ public class InternalReconciliationService {
 	private final ReconciliationIssueRepository issueRepository;
 	private final Clock clock;
 	private final boolean schedulerEnabled;
+	private final int walletBatchSize;
 	private final JsonMapper mapper = JsonMapper.builder().build();
 
 	@org.springframework.beans.factory.annotation.Autowired
@@ -54,14 +56,20 @@ public class InternalReconciliationService {
 			WalletRepository walletRepository,
 			ReconciliationIssueRepository issueRepository,
 			Clock clock,
-			@Value("${reconciliation.internal.enabled:true}") boolean schedulerEnabled) {
+			@Value("${reconciliation.internal.enabled:true}") boolean schedulerEnabled,
+			@Value("${reconciliation.internal.wallet-batch-size:" + DEFAULT_WALLET_BATCH_SIZE + "}") int walletBatchSize) {
 		this.ledgerQuery = Objects.requireNonNull(ledgerQuery, "ledgerQuery");
 		this.sagaStateStore = Objects.requireNonNull(sagaStateStore, "sagaStateStore");
 		this.queryRepository = Objects.requireNonNull(queryRepository, "queryRepository");
 		this.walletRepository = Objects.requireNonNull(walletRepository, "walletRepository");
 		this.issueRepository = Objects.requireNonNull(issueRepository, "issueRepository");
 		this.clock = Objects.requireNonNull(clock, "clock");
+		if (walletBatchSize <= 0) {
+			throw new IllegalArgumentException(
+					"reconciliation.internal.wallet-batch-size must be positive, got " + walletBatchSize);
+		}
 		this.schedulerEnabled = schedulerEnabled;
+		this.walletBatchSize = walletBatchSize;
 	}
 
 	public InternalReconciliationService(
@@ -71,7 +79,8 @@ public class InternalReconciliationService {
 			WalletRepository walletRepository,
 			ReconciliationIssueRepository issueRepository,
 			Clock clock) {
-		this(ledgerQuery, sagaStateStore, queryRepository, walletRepository, issueRepository, clock, false);
+		this(ledgerQuery, sagaStateStore, queryRepository, walletRepository, issueRepository, clock, false,
+				DEFAULT_WALLET_BATCH_SIZE);
 	}
 
 	@Scheduled(fixedDelayString = "${reconciliation.internal.interval-ms:3600000}")
@@ -116,28 +125,39 @@ public class InternalReconciliationService {
 			}
 		}
 
-		for (WalletBalanceRow projected : queryRepository.findAllBalances()) {
-			Optional<Wallet> replayedOpt = walletRepository.load(projected.walletId());
-			if (replayedOpt.isEmpty()) {
-				if (openIssue(ReconciliationIssueType.BALANCE_MISMATCH, "BALANCE_MISMATCH:" + projected.walletId(),
-						Map.of("walletId", projected.walletId().toString(), "reason", "Missing in event store"),
-						checkedAt)) {
-					opened++;
-				}
-				continue;
+		UUID afterWalletId = null;
+		while (true) {
+			List<WalletBalanceRow> batch = queryRepository.findBalancesBatch(afterWalletId, walletBatchSize);
+			if (batch.isEmpty()) {
+				break;
 			}
-			Wallet replayed = replayedOpt.get();
-			if (projected.version() == replayed.committedVersion()
-					&& projected.balance() != replayed.balance().amount()) {
-				if (openIssue(ReconciliationIssueType.BALANCE_MISMATCH, "BALANCE_MISMATCH:" + projected.walletId(),
-						Map.of("walletId", projected.walletId().toString(),
-								"version", projected.version(),
-								"projectedBalance", projected.balance(),
-								"replayedBalance", replayed.balance().amount()),
-						checkedAt)) {
-					opened++;
+			for (WalletBalanceRow projected : batch) {
+				Optional<Wallet> replayedOpt = walletRepository.load(projected.walletId());
+				if (replayedOpt.isEmpty()) {
+					if (openIssue(ReconciliationIssueType.BALANCE_MISMATCH, "BALANCE_MISMATCH:" + projected.walletId(),
+							Map.of("walletId", projected.walletId().toString(), "reason", "Missing in event store"),
+							checkedAt)) {
+						opened++;
+					}
+					continue;
+				}
+				Wallet replayed = replayedOpt.get();
+				if (projected.version() == replayed.committedVersion()
+						&& projected.balance() != replayed.balance().amount()) {
+					if (openIssue(ReconciliationIssueType.BALANCE_MISMATCH, "BALANCE_MISMATCH:" + projected.walletId(),
+							Map.of("walletId", projected.walletId().toString(),
+									"version", projected.version(),
+									"projectedBalance", projected.balance(),
+									"replayedBalance", replayed.balance().amount()),
+							checkedAt)) {
+						opened++;
+					}
 				}
 			}
+			if (batch.size() < walletBatchSize) {
+				break;
+			}
+			afterWalletId = batch.getLast().walletId();
 		}
 
 		log.info("Internal reconciliation completed: issuesOpened={}", opened);
