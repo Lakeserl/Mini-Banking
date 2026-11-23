@@ -1,6 +1,5 @@
 package com.lakeserl.mini_banking.query.api;
 
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
@@ -46,6 +45,42 @@ class WalletQueryControllerWebTest {
 
 	@MockitoBean
 	JwtDecoder jwtDecoder;
+
+	@Test
+	void listMyWalletsReturnsOnlyAuthenticatedUsersWalletsAndRejectsInvalidSubject() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Instant now = Instant.parse("2026-11-22T08:00:00Z");
+
+		when(queryRepository.findBalancesByOwner(ownerId)).thenReturn(List.of(
+				new WalletBalanceRow(walletId, ownerId, "VND", 750_000L, "ACTIVE", 4L, now)));
+
+		mockMvc.perform(get("/api/wallets")
+						.with(jwt().jwt(j -> j.subject(ownerId.toString()))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.length()").value(1))
+				.andExpect(jsonPath("$[0].walletId").value(walletId.toString()))
+				.andExpect(jsonPath("$[0].ownerId").value(ownerId.toString()))
+				.andExpect(jsonPath("$[0].balance").value(750_000L))
+				.andExpect(jsonPath("$[0].currency").value("VND"))
+				.andExpect(jsonPath("$[0].status").value("ACTIVE"))
+				.andExpect(jsonPath("$[0].version").value(4L))
+				.andExpect(jsonPath("$[0].updatedAt").value(now.toString()));
+
+		UUID emptyOwner = UUID.randomUUID();
+		when(queryRepository.findBalancesByOwner(emptyOwner)).thenReturn(List.of());
+		mockMvc.perform(get("/api/wallets")
+						.with(jwt().jwt(j -> j.subject(emptyOwner.toString()))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.length()").value(0));
+
+		mockMvc.perform(get("/api/wallets"))
+				.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/wallets")
+						.with(jwt().jwt(j -> j.subject("not-a-uuid"))))
+				.andExpect(status().isUnauthorized());
+	}
 
 	@Test
 	void getBalanceReturns200ForOwnerAndAdmin403ForStrangerAnd404WhenMissing() throws Exception {

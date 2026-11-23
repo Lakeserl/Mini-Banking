@@ -13,6 +13,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.lakeserl.mini_banking.PostgresDataTest;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositConfirmed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositRequested;
+import com.lakeserl.mini_banking.query.api.QueryRepository;
 import com.lakeserl.mini_banking.shared.domain.AccountType;
 import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.Money;
@@ -30,6 +31,9 @@ class QueryProjectorsPostgresTest {
 
 	@Autowired
 	TransactionHistoryProjector txHistoryProjector;
+
+	@Autowired
+	QueryRepository queryRepository;
 
 	@BeforeEach
 	void clean() {
@@ -68,5 +72,36 @@ class QueryProjectorsPostgresTest {
 				Long.class);
 		assertThat(status).isEqualTo("CONFIRMED");
 		assertThat(dailyDeposit).isEqualTo(750_000L);
+	}
+
+	@Test
+	void findBalancesByOwnerIsolatesOwnerAndOrdersByCurrencyThenWalletId() {
+		UUID ownerA = UUID.randomUUID();
+		UUID ownerB = UUID.randomUUID();
+		UUID emptyOwner = UUID.randomUUID();
+		UUID walletUsd = UUID.fromString("00000000-0000-0000-0000-000000000099");
+		UUID walletVnd1 = UUID.fromString("00000000-0000-0000-0000-000000000001");
+		UUID walletVnd2 = UUID.fromString("00000000-0000-0000-0000-000000000002");
+		UUID walletB1 = UUID.randomUUID();
+		Instant t1 = Instant.parse("2026-11-22T08:00:00Z");
+
+		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletVnd2, ownerA, Currency.VND), 1L, t1);
+		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletVnd1, ownerA, Currency.VND), 1L, t1);
+		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletUsd, ownerA, Currency.USD), 1L, t1);
+		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletB1, ownerB, Currency.VND), 1L, t1);
+
+		var ownerAWallets = queryRepository.findBalancesByOwner(ownerA);
+		assertThat(ownerAWallets).hasSize(3);
+		assertThat(ownerAWallets.get(0).walletId()).isEqualTo(walletUsd);
+		assertThat(ownerAWallets.get(0).currency()).isEqualTo("USD");
+		assertThat(ownerAWallets.get(0).balance()).isZero();
+		assertThat(ownerAWallets.get(0).status()).isEqualTo("ACTIVE");
+		assertThat(ownerAWallets.get(0).version()).isEqualTo(1L);
+		assertThat(ownerAWallets.get(0).updatedAt()).isEqualTo(t1);
+		assertThat(ownerAWallets.get(1).walletId()).isEqualTo(walletVnd1);
+		assertThat(ownerAWallets.get(2).walletId()).isEqualTo(walletVnd2);
+		assertThat(ownerAWallets).allMatch(w -> w.ownerId().equals(ownerA));
+
+		assertThat(queryRepository.findBalancesByOwner(emptyOwner)).isEmpty();
 	}
 }

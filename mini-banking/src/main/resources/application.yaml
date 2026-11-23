@@ -1,8 +1,13 @@
+server:
+  shutdown: graceful
+
 spring:
   application:
     name: mini-banking
   profiles:
     default: dev
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   jpa:
     open-in-view: false
     hibernate:
@@ -69,3 +74,20 @@ reconciliation:
     enabled: true
     cron: "0 15 0 * * *"
     pending-deposit-threshold-seconds: 300
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
+security:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  dev-auth:
+    enabled: false

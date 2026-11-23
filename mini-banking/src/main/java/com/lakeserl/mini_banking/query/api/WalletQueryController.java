@@ -60,6 +60,14 @@ public class WalletQueryController {
 		this.queryRepository = Objects.requireNonNull(queryRepository, "queryRepository");
 	}
 
+	@GetMapping("/wallets")
+	public List<WalletBalanceResponse> listMyWallets(@AuthenticationPrincipal Jwt jwt) {
+		UUID userId = requireUserId(jwt);
+		return queryRepository.findBalancesByOwner(userId).stream()
+				.map(WalletQueryController::toBalanceResponse)
+				.toList();
+	}
+
 	@GetMapping("/wallets/{id}/balance")
 	public WalletBalanceResponse getBalance(
 			@PathVariable UUID id,
@@ -67,8 +75,7 @@ public class WalletQueryController {
 			Authentication authentication) {
 		UUID userId = requireUserId(jwt);
 		WalletBalanceRow row = requireAuthorizedWallet(id, userId, authentication);
-		return new WalletBalanceResponse(row.walletId(), row.ownerId(), row.balance(), row.currency(),
-				row.status(), row.version(), row.updatedAt());
+		return toBalanceResponse(row);
 	}
 
 	@GetMapping("/wallets/{id}/transactions")
@@ -119,6 +126,11 @@ public class WalletQueryController {
 		return queryRepository.findDailyReports(from, to).stream()
 				.map(this::toDailyResponse)
 				.toList();
+	}
+
+	private static WalletBalanceResponse toBalanceResponse(WalletBalanceRow row) {
+		return new WalletBalanceResponse(row.walletId(), row.ownerId(), row.balance(), row.currency(),
+				row.status(), row.version(), row.updatedAt());
 	}
 
 	private DailyReportResponse toDailyResponse(DailyReportRow row) {

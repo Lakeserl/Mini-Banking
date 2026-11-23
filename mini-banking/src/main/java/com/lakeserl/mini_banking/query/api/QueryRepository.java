@@ -43,6 +43,13 @@ public class QueryRepository {
 			WHERE wallet_id = ?
 			""";
 
+	private static final String SELECT_BALANCES_BY_OWNER_SQL = """
+			SELECT wallet_id, owner_id, currency, balance, status, aggregate_version, updated_at
+			FROM wallet_balances
+			WHERE owner_id = ?
+			ORDER BY currency ASC, wallet_id ASC
+			""";
+
 	private static final String SELECT_ALL_BALANCES_SQL = """
 			SELECT wallet_id, owner_id, currency, balance, status, aggregate_version, updated_at
 			FROM wallet_balances
@@ -158,6 +165,11 @@ public class QueryRepository {
 	public Optional<WalletBalanceRow> findBalance(UUID walletId) {
 		Objects.requireNonNull(walletId, "walletId");
 		return jdbc.query(SELECT_BALANCE_SQL, BALANCE_MAPPER, walletId).stream().findFirst();
+	}
+
+	public List<WalletBalanceRow> findBalancesByOwner(UUID ownerId) {
+		Objects.requireNonNull(ownerId, "ownerId");
+		return jdbc.query(SELECT_BALANCES_BY_OWNER_SQL, BALANCE_MAPPER, ownerId);
 	}
 
 	public List<WalletBalanceRow> findAllBalances() {
