@@ -46,9 +46,12 @@ public class ProjectionRebuildService {
 		}
 	}
 
-	private static final String TRUNCATE_PROJECTIONS_SQL = """
-			TRUNCATE TABLE ledger_entries, wallet_balances, transaction_history, daily_reports RESTART IDENTITY
-			""";
+	// DELETE FROM avoids PG16 sequence-ownership failures on TRUNCATE ... RESTART IDENTITY under least-privilege app roles.
+	private static final List<String> CLEAR_PROJECTION_TABLES_SQL = List.of(
+			"DELETE FROM ledger_entries",
+			"DELETE FROM wallet_balances",
+			"DELETE FROM transaction_history",
+			"DELETE FROM daily_reports");
 
 	private static final String DELETE_PROCESSED_SQL = """
 			DELETE FROM processed_events WHERE consumer_group IN (?, ?, ?)
@@ -98,7 +101,9 @@ public class ProjectionRebuildService {
 		try {
 			pauseRunningListeners(pausedContainers);
 			tx.execute(status -> {
-				jdbc.execute(TRUNCATE_PROJECTIONS_SQL);
+				for (String sql : CLEAR_PROJECTION_TABLES_SQL) {
+					jdbc.update(sql);
+				}
 				jdbc.update(DELETE_PROCESSED_SQL,
 						ledgerProjector.consumerGroup(),
 						balanceProjector.consumerGroup(),

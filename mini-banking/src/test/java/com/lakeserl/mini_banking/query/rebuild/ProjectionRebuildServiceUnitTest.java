@@ -6,8 +6,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -120,7 +123,14 @@ class ProjectionRebuildServiceUnitTest {
 
 		InOrder order = inOrder(container, jdbc, ledgerProjector, balanceProjector, txHistoryProjector);
 		order.verify(container).pause();
-		order.verify(jdbc).execute(anyString());
+		order.verify(jdbc).update("DELETE FROM ledger_entries");
+		order.verify(jdbc).update("DELETE FROM wallet_balances");
+		order.verify(jdbc).update("DELETE FROM transaction_history");
+		order.verify(jdbc).update("DELETE FROM daily_reports");
+		order.verify(jdbc).update(contains("DELETE FROM processed_events"),
+				eq(LedgerProjector.DEFAULT_CONSUMER_GROUP),
+				eq(BalanceProjector.DEFAULT_CONSUMER_GROUP),
+				eq(TransactionHistoryProjector.DEFAULT_CONSUMER_GROUP));
 		order.verify(ledgerProjector).project(e1.storedEvent().eventId(), e1.storedEvent().event(), t1);
 		order.verify(balanceProjector).project(e1.storedEvent().eventId(), e1.storedEvent().event(), 1L, t1);
 		order.verify(txHistoryProjector).project(e2.storedEvent().eventId(), e2.storedEvent().event(),
@@ -132,6 +142,7 @@ class ProjectionRebuildServiceUnitTest {
 		order.verify(txHistoryProjector).project(e4.storedEvent().eventId(), e4.storedEvent().event(),
 				t1.plusSeconds(3));
 		order.verify(container).resume();
+		verify(jdbc, never()).execute(anyString());
 	}
 
 	@Test

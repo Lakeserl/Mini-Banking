@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.env.*
+.envrc
+*.pem
+*.key
+target/
+Dockerfile*
+docker-compose*
+graphify-out/
+*.log
+.jqwik-database
+docs/
+.vscode/
+.agents/

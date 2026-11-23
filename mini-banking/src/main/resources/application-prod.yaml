@@ -4,9 +4,12 @@ spring:
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
   flyway:
-    baseline-on-migrate: false
-    user: ${DB_MIGRATION_USERNAME}
-    password: ${DB_MIGRATION_PASSWORD}
+    enabled: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${PROD_JWT_ISSUER_URI}
 
 security:
   dev-auth:

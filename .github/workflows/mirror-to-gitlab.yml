@@ -1,0 +1,53 @@
+name: Mirror to GitLab
+
+on:
+  push:
+    branches:
+      - main
+      - backend
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-gitlab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push ref to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_PROJECT_PATH: ${{ vars.GITLAB_PROJECT_PATH }}
+        run: |
+          set -euo pipefail
+          : "${GITLAB_TOKEN:?Set GITLAB_TOKEN in GitHub Actions Secrets}"
+          : "${GITLAB_PROJECT_PATH:?Set GITLAB_PROJECT_PATH in GitHub Actions Variables}"
+
+          export GIT_TERMINAL_PROMPT=0
+          ASKPASS_SCRIPT="$(mktemp "${RUNNER_TEMP}/git-askpass.XXXXXX")"
+          trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+          chmod 700 "$ASKPASS_SCRIPT"
+
+          cat <<'EOF' > "$ASKPASS_SCRIPT"
+          #!/bin/sh
+          case "$1" in
+            Username*) printf '%s\n' "oauth2" ;;
+            Password*) printf '%s\n' "$GITLAB_TOKEN" ;;
+            *) printf '\n' ;;
+          esac
+          EOF
+
+          export GIT_ASKPASS="$ASKPASS_SCRIPT"
+          git push "https://gitlab.com/${GITLAB_PROJECT_PATH}.git" "HEAD:${GITHUB_REF}"

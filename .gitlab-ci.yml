@@ -1,0 +1,219 @@
+stages:
+  - test
+  - build
+  - backup
+  - migration
+  - deploy
+
+variables:
+  HOST_RESOURCE_GROUP: "local-host-stack"
+  MAVEN_OPTS: "-Xmx512m -Xms128m"
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "backend"'
+      changes:
+        - mini-banking/**
+        - docker-compose*.yml
+        - .gitlab-ci.yml
+        - scripts/**
+    - when: never
+
+.java21_setup:
+  before_script:
+    - |
+      if ! "${JAVA_HOME:-/nonexistent}/bin/java" -version 2>&1 | grep -q 'version "21\.'; then
+        for candidate in /usr/lib/jvm/java-21-openjdk /usr/lib/jvm/java-21-openjdk-amd64; do
+          if [ -x "${candidate}/bin/java" ]; then
+            export JAVA_HOME="$candidate"
+            break
+          fi
+        done
+      fi
+      if [ -n "${JAVA_HOME:-}" ]; then
+        export PATH="${JAVA_HOME}/bin:${PATH}"
+      fi
+      java -version 2>&1 | grep -q 'version "21\.' || { echo "ERROR: Java 21 is required (found $(java -version 2>&1 | head -n1))" >&2; exit 1; }
+
+.dev_rules:
+  tags:
+    - dev-runner
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "backend"'
+
+.prod_rules:
+  tags:
+    - prod-runner
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+
+test:dev:
+  extends:
+    - .java21_setup
+    - .dev_rules
+  stage: test
+  interruptible: true
+  script:
+    - ./mini-banking/mvnw -f mini-banking/pom.xml -B test -DargLine="-Xmx768m -Xms256m -Dspring.test.context.cache.maxSize=2"
+    - POSTGRES_PASSWORD=check DB_URL=jdbc:postgresql://postgres:5432/walletledger_dev DB_USERNAME=mb_dev DB_PASSWORD=check JWT_SECRET=check-only-jwt-secret-at-least-32-bytes-0000 docker compose -f docker-compose.dev.yml config -q
+
+test:prod:
+  extends:
+    - .java21_setup
+    - .prod_rules
+  stage: test
+  interruptible: true
+  script:
+    - ./mini-banking/mvnw -f mini-banking/pom.xml -B test -DargLine="-Xmx768m -Xms256m -Dspring.test.context.cache.maxSize=2"
+    - POSTGRES_PASSWORD=check IMAGE_REF=check:v0 DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod DB_USERNAME=mb_prod_app DB_PASSWORD=check PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking docker compose -f docker-compose.prod.yml config -q
+
+build:dev:
+  extends:
+    - .dev_rules
+  stage: build
+  interruptible: true
+  script:
+    - printf '%s' "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build --memory=1536m -t "${CI_REGISTRY_IMAGE}:dev-${CI_COMMIT_SHORT_SHA}" ./mini-banking
+    - docker push "${CI_REGISTRY_IMAGE}:dev-${CI_COMMIT_SHORT_SHA}"
+  after_script:
+    - docker logout "$CI_REGISTRY" >/dev/null 2>&1 || true
+
+build:prod:
+  extends:
+    - .prod_rules
+  stage: build
+  interruptible: true
+  script:
+    - printf '%s' "$CI_JOB_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build --memory=1536m -t "${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}" ./mini-banking
+    - docker push "${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}"
+  after_script:
+    - docker logout "$CI_REGISTRY" >/dev/null 2>&1 || true
+
+backup:dev:
+  extends:
+    - .dev_rules
+  stage: backup
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: dev
+    action: prepare
+  script:
+    - bash scripts/ci-backup.sh dev
+
+approve-and-backup:prod:
+  tags:
+    - prod-runner
+  stage: backup
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: prod
+    action: prepare
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+      when: manual
+      allow_failure: false
+  script:
+    - bash scripts/ci-backup.sh prod
+
+migrate:dev:
+  extends:
+    - .dev_rules
+  stage: migration
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: dev
+    action: prepare
+  script:
+    - bash scripts/ci-migrate.sh dev
+
+migrate:prod:
+  extends:
+    - .prod_rules
+  stage: migration
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: prod
+    action: prepare
+  script:
+    - bash scripts/ci-migrate.sh prod
+
+deploy:dev:
+  extends:
+    - .dev_rules
+  stage: deploy
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: dev
+  script:
+    - IMAGE_TAG="dev-${CI_COMMIT_SHORT_SHA}" bash scripts/ci-deploy.sh dev
+
+deploy:prod:
+  extends:
+    - .prod_rules
+  stage: deploy
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: prod
+  script:
+    - IMAGE_TAG="${CI_COMMIT_TAG}" bash scripts/ci-deploy.sh prod
+
+rollback:prod:
+  tags:
+    - prod-runner
+  stage: deploy
+  needs: []
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: prod
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+      when: manual
+      allow_failure: true
+  script:
+    - bash scripts/ci-rollback.sh
+
+nightly:verify:
+  extends:
+    - .java21_setup
+  stage: test
+  tags:
+    - dev-runner
+  interruptible: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - ./mini-banking/mvnw -f mini-banking/pom.xml -B test -DargLine="-Xmx768m -Xms256m -Dspring.test.context.cache.maxSize=2"
+
+nightly:backup-prod:
+  stage: backup
+  needs: []
+  tags:
+    - prod-runner
+  interruptible: false
+  resource_group: ${HOST_RESOURCE_GROUP}
+  environment:
+    name: prod
+    action: prepare
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - bash scripts/ci-backup.sh prod --online

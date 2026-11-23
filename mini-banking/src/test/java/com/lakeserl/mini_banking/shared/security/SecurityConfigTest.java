@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 
@@ -90,6 +91,42 @@ class SecurityConfigTest {
 		assertThatThrownBy(() -> SecurityConfig.buildHmacJwtDecoder("a".repeat(31)))
 				.isInstanceOf(IllegalArgumentException.class);
 		assertThat(SecurityConfig.buildHmacJwtDecoder("a".repeat(32))).isNotNull();
+	}
+
+	@Test
+	void jwtAuthenticationConverterExtractsKeycloakRealmAccessRolesAndIgnoresMalformedClaims() {
+		JwtAuthenticationConverter converter = config.jwtAuthenticationConverter();
+		Instant now = Instant.now();
+
+		Jwt keycloakJwt = Jwt.withTokenValue("tok-kc")
+				.header("alg", "RS256")
+				.subject(UUID.randomUUID().toString())
+				.issuedAt(now)
+				.expiresAt(now.plusSeconds(300))
+				.claim("realm_access", Map.of("roles", Arrays.asList("admin", "ROLE_user", "ROLE_ teller", "ROLE_   ", "role_", "  ", 123, null)))
+				.claim("roles", List.of("ADMIN"))
+				.claim("scope", "openid profile")
+				.build();
+
+		List<String> authorities = converter.convert(keycloakJwt).getAuthorities().stream()
+				.map(GrantedAuthority::getAuthority)
+				.toList();
+		assertThat(authorities)
+				.contains("ROLE_ADMIN", "ROLE_USER", "ROLE_TELLER", "SCOPE_openid", "SCOPE_profile")
+				.doesNotContain("ROLE_admin", "ROLE_ROLE_USER", "ROLE_ TELLER", "ROLE_   ", "ROLE_");
+		assertThat(authorities.stream().filter("ROLE_ADMIN"::equals).count()).isEqualTo(1L);
+
+		Jwt malformedJwt = Jwt.withTokenValue("tok-bad")
+				.header("alg", "RS256")
+				.subject(UUID.randomUUID().toString())
+				.issuedAt(now)
+				.expiresAt(now.plusSeconds(300))
+				.claim("realm_access", "not-a-map")
+				.claim("roles", "not-a-list")
+				.build();
+		assertThat(converter.convert(malformedJwt).getAuthorities().stream()
+				.map(GrantedAuthority::getAuthority))
+				.noneMatch(a -> a.startsWith("ROLE_"));
 	}
 
 	@Test
@@ -223,7 +260,10 @@ class SecurityConfigTest {
 
 		assertThat(base.getProperty("server.shutdown")).isEqualTo("graceful");
 		assertThat(base.getProperty("spring.lifecycle.timeout-per-shutdown-phase")).isEqualTo("30s");
+		assertThat(base.getProperty("spring.profiles.default")).isNull();
 		assertThat(base.getProperty("management.endpoint.health.probes.enabled")).isEqualTo("true");
+		assertThat(base.getProperty("management.endpoint.health.group.readiness.include"))
+				.isEqualTo("readinessState,db");
 		assertThat(base.getProperty("management.endpoint.health.show-details")).isEqualTo("never");
 		assertThat(base.getProperty("management.endpoints.web.exposure.include")).isEqualTo("health,prometheus");
 		assertThat(base.getProperty("security.cors.allowed-origins")).isEqualTo("${CORS_ALLOWED_ORIGINS:}");
@@ -233,6 +273,12 @@ class SecurityConfigTest {
 				.isEqualTo("${CORS_ALLOWED_ORIGINS:http://localhost:3000}");
 		assertThat(dev.getProperty("security.dev-auth.enabled")).isEqualTo("true");
 
+		assertThat(prod.getProperty("spring.flyway.enabled")).isEqualTo("false");
+		assertThat(prod.getProperty("spring.flyway.user")).isNull();
+		assertThat(prod.getProperty("spring.flyway.password")).isNull();
+		assertThat(prod.getProperty("spring.security.oauth2.resourceserver.jwt.issuer-uri"))
+				.isEqualTo("${PROD_JWT_ISSUER_URI}");
+		assertThat(prod.getProperty("spring.security.oauth2.resourceserver.jwt.jwk-set-uri")).isNull();
 		assertThat(prod.getProperty("security.dev-auth.enabled")).isEqualTo("false");
 	}
 

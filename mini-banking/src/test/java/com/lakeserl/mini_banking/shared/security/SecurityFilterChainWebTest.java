@@ -32,7 +32,8 @@ import com.lakeserl.mini_banking.shared.idempotency.IdempotencyService;
 @ActiveProfiles("prod")
 @TestPropertySource(properties = {
 		"security.dev-auth.enabled=true",
-		"security.jwt.secret=prod-test-jwt-secret-key-at-least-32-bytes-long"
+		"security.jwt.secret=prod-test-jwt-secret-key-at-least-32-bytes-long",
+		"PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking"
 })
 class SecurityFilterChainWebTest {
 

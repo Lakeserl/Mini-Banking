@@ -5,8 +5,12 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -102,19 +106,35 @@ public class SecurityConfig {
 		JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
 		converter.setJwtGrantedAuthoritiesConverter(jwt -> {
 			Collection<GrantedAuthority> authorities = new ArrayList<>(scopesConverter.convert(jwt));
-			List<String> roles = jwt.getClaimAsStringList("roles");
-			if (roles != null) {
-				for (String role : roles) {
-					if (role != null && !role.isBlank()) {
-						String trimmed = role.trim();
-						String normalized = trimmed.startsWith("ROLE_") ? trimmed : "ROLE_" + trimmed;
-						authorities.add(new SimpleGrantedAuthority(normalized));
-					}
-				}
+			Set<String> roleAuthorities = new LinkedHashSet<>();
+			addNormalizedRoles(jwt.getClaim("roles"), roleAuthorities);
+			Object realmAccess = jwt.getClaim("realm_access");
+			if (realmAccess instanceof Map<?, ?> realmMap) {
+				addNormalizedRoles(realmMap.get("roles"), roleAuthorities);
+			}
+			for (String roleAuthority : roleAuthorities) {
+				authorities.add(new SimpleGrantedAuthority(roleAuthority));
 			}
 			return authorities;
 		});
 		return converter;
+	}
+
+	private static void addNormalizedRoles(Object rawRoles, Set<String> targetRoles) {
+		if (!(rawRoles instanceof Collection<?> items)) {
+			return;
+		}
+		for (Object item : items) {
+			if (item instanceof String raw && !raw.isBlank()) {
+				String upper = raw.trim().toUpperCase(Locale.ROOT);
+				if (upper.startsWith("ROLE_")) {
+					upper = upper.substring("ROLE_".length()).trim();
+				}
+				if (!upper.isEmpty()) {
+					targetRoles.add("ROLE_" + upper);
+				}
+			}
+		}
 	}
 
 	/**
