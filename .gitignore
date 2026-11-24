@@ -1,15 +1,13 @@
 docs/*
-phase0-review-project-roadmap.md
-.github/skills/code-review/SKILL.md
-.github/*
 .vscode/
 .gitkeep
 graphify-out/*
 .env
 .env.*
 !.env.example
-mini-banking/AGENTS.md
 mini-banking/graphify-out/*
 .gitignore
 /.agents/*
 AGENTS.md
+mini-banking/.envrc
+phase0-review-project-roadmap.md
