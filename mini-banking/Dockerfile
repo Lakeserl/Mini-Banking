@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
 FROM eclipse-temurin:21-jdk-alpine AS builder
+RUN apk add --no-cache wget
 WORKDIR /build
 ENV MAVEN_OPTS="-Xmx512m -Xms128m"
 

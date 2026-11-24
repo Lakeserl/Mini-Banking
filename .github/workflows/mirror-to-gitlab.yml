@@ -50,4 +50,8 @@ jobs:
           EOF
 
           export GIT_ASKPASS="$ASKPASS_SCRIPT"
-          git push "https://gitlab.com/${GITLAB_PROJECT_PATH}.git" "HEAD:${GITHUB_REF}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git push "https://gitlab.com/${GITLAB_PROJECT_PATH}.git" "${GITHUB_REF}:${GITHUB_REF}"
+          else
+            git push "https://gitlab.com/${GITLAB_PROJECT_PATH}.git" "HEAD:${GITHUB_REF}"
+          fi

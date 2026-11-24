@@ -76,7 +76,7 @@ if [ -z "$free_mb" ] || [ "$free_mb" -lt "$MIN_FREE_MB" ]; then
 fi
 
 if [ "$ENV_NAME" = "dev" ]; then
-  other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q 2>/dev/null || true)"
+  other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q)"
   if [ -n "$other_cids" ] && [ "${ALLOW_DEV_STOP_PROD:-false}" != "true" ]; then
     echo "ERROR: prod stack is currently running on this 8GB host; refusing to stop prod automatically." >&2
     echo "Run manually then Retry backup:dev:" >&2
@@ -87,29 +87,29 @@ if [ "$ENV_NAME" = "dev" ]; then
   if [ -n "$other_cids" ]; then
     docker compose -p "$OTHER_PROJECT" down -t 35
   fi
-  dev_app_cid="$(docker compose -f "$COMPOSE_FILE" ps -q app 2>/dev/null || true)"
+  dev_app_cid="$(docker compose -f "$COMPOSE_FILE" ps -q app)"
   if [ -n "$dev_app_cid" ]; then
     docker compose -f "$COMPOSE_FILE" stop -t 35 app
   fi
   docker compose -f "$COMPOSE_FILE" up -d --wait postgres
 else
   if [ "$MODE" = "--online" ]; then
-    other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q 2>/dev/null || true)"
+    other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q)"
     if [ -n "$other_cids" ]; then
       echo "Skipping online prod backup because dev stack is active on this 8GB host."
       exit 0
     fi
-    pg_running="$(docker compose -f "$COMPOSE_FILE" ps -q postgres 2>/dev/null || true)"
+    pg_running="$(docker compose -f "$COMPOSE_FILE" ps -q postgres)"
     if [ -z "$pg_running" ]; then
       echo "Skipping online prod backup because prod Postgres container is not running."
       exit 0
     fi
   else
-    other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q 2>/dev/null || true)"
+    other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q)"
     if [ -n "$other_cids" ]; then
       docker compose -p "$OTHER_PROJECT" down -t 35
     fi
-    prod_app_cid="$(docker compose -f "$COMPOSE_FILE" ps -q app 2>/dev/null || true)"
+    prod_app_cid="$(docker compose -f "$COMPOSE_FILE" ps -q app)"
     if [ -n "$prod_app_cid" ]; then
       docker compose -f "$COMPOSE_FILE" stop -t 35 app
     fi
