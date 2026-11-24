@@ -435,6 +435,7 @@ test_8_prod_rollback_fails_cleanly_on_missing_or_empty_pointers() {
 
 test_9_gitlab_ci_and_compose_security_invariants() {
   local gl="$REPO_ROOT/.gitlab-ci.yml"
+  local dev_c="$REPO_ROOT/docker-compose.dev.yml"
   local prod_c="$REPO_ROOT/docker-compose.prod.yml"
   local leg_c="$REPO_ROOT/docker-compose.yml"
   local prod_grants="$REPO_ROOT/scripts/init-prod-db-grants.sql"
@@ -485,11 +486,41 @@ public class VerifyCi {
       Map<String, Object> nj = (Map<String, Object>) doc.get(nonSecretJob);
       if (nj.containsKey("environment")) throw new IllegalStateException(nonSecretJob + " must not expose env secrets via environment:");
     }
+    for (int i = 1; i < args.length; i++) {
+      String composePath = args[i];
+      Map<String, Object> compose = new Yaml().load(Files.readString(Path.of(composePath)));
+      Map<String, Object> services = (Map<String, Object>) compose.get("services");
+      Map<String, Object> kafka = services == null ? null : (Map<String, Object>) services.get("kafka");
+      if (kafka == null) throw new IllegalStateException(composePath + " missing services.kafka");
+      Object envObj = kafka.get("environment");
+      String logDirs = null;
+      if (envObj instanceof Map<?, ?> envMap) {
+        Object val = envMap.get("KAFKA_LOG_DIRS");
+        if (val != null) logDirs = val.toString();
+      } else if (envObj instanceof List<?> envList) {
+        for (Object item : envList) {
+          String s = String.valueOf(item);
+          if (s.startsWith("KAFKA_LOG_DIRS=")) {
+            logDirs = s.substring("KAFKA_LOG_DIRS=".length());
+          }
+        }
+      }
+      if (!"/var/lib/kafka/data".equals(logDirs)) {
+        throw new IllegalStateException(composePath + " must set services.kafka.environment.KAFKA_LOG_DIRS=/var/lib/kafka/data (found=" + logDirs + ")");
+      }
+      List<?> volumes = (List<?>) kafka.get("volumes");
+      boolean hasWritableMount = volumes != null && volumes.stream()
+          .map(String::valueOf)
+          .anyMatch(v -> v.matches("^[A-Za-z0-9._-]+:/var/lib/kafka/data(:rw)?$"));
+      if (!hasWritableMount) {
+        throw new IllegalStateException(composePath + " must mount a writable named volume at /var/lib/kafka/data");
+      }
+    }
     System.out.println("CI_YAML_INVARIANTS_OK");
   }
 }
 EOF
-  "$java_bin" -cp "$SNAKEYAML" "$TEST_TMP/VerifyCi.java" "$gl"
+  "$java_bin" -cp "$SNAKEYAML" "$TEST_TMP/VerifyCi.java" "$gl" "$dev_c" "$prod_c" "$leg_c"
 
   assert_contains "$(cat "$gl")" 'if ! "${JAVA_HOME:-/nonexistent}/bin/java" -version' "java21_setup checks actual java version of JAVA_HOME"
   assert_contains "$(cat "$prod_c")" "- SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI" "prod compose forwards optional JWK_SET_URI"
