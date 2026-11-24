@@ -104,16 +104,23 @@ case "$1" in
     shift || true
     case "$subcmd" in
       ps)
+        if [ "${MOCK_COMPOSE_PS_FAIL:-0}" = "1" ]; then
+          echo "ERROR: Cannot connect to the Docker daemon" >&2
+          exit 1
+        fi
         service_filter=""
+        include_all=0
         for arg in "$@"; do
           case "$arg" in
             -q) ;;
+            -a|--all) include_all=1 ;;
             *) service_filter="$arg" ;;
           esac
         done
         if [ "$target" = "mini-banking-prod" ]; then
           if [ "$service_filter" = "app" ]; then
             [ "${MOCK_PROD_APP_RUNNING:-0}" = "1" ] && echo "prod-app-cid"
+            [ "$include_all" = "1" ] && [ "${MOCK_PROD_APP_EXITED:-0}" = "1" ] && echo "prod-app-exited-cid"
           elif [ "$service_filter" = "postgres" ]; then
             [ "${MOCK_PROD_PG_RUNNING:-1}" = "1" ] && echo "prod-pg-cid"
           else
@@ -123,6 +130,7 @@ case "$1" in
         else
           if [ "$service_filter" = "app" ]; then
             [ "${MOCK_DEV_APP_RUNNING:-0}" = "1" ] && echo "dev-app-cid"
+            [ "$include_all" = "1" ] && [ "${MOCK_DEV_APP_EXITED:-0}" = "1" ] && echo "dev-app-exited-cid"
           elif [ "$service_filter" = "postgres" ]; then
             [ "${MOCK_DEV_PG_RUNNING:-1}" = "1" ] && echo "dev-pg-cid"
           else
@@ -431,6 +439,7 @@ test_9_gitlab_ci_and_compose_security_invariants() {
   local leg_c="$REPO_ROOT/docker-compose.yml"
   local prod_grants="$REPO_ROOT/scripts/init-prod-db-grants.sql"
   local mirror_wf="$REPO_ROOT/.github/workflows/mirror-to-gitlab.yml"
+  local dockerfile="$REPO_ROOT/mini-banking/Dockerfile"
 
   local m2_repo="${M2_REPO:-${HOME}/.m2/repository}"
   SNAKEYAML="$(find "${m2_repo}/org/yaml/snakeyaml" -name 'snakeyaml-*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null | head -n 1 || true)"
@@ -488,6 +497,8 @@ EOF
   assert_contains "$(cat "$prod_grants")" "to_regclass('public.flyway_schema_history')" "init-prod-db-grants.sql guards flyway_schema_history on re-run"
   assert_contains "$(cat "$prod_grants")" "REVOKE ALL ON TABLE public.flyway_schema_history FROM mb_prod_app" "init-prod-db-grants.sql revokes flyway_schema_history from mb_prod_app"
   assert_contains "$(cat "$mirror_wf")" "persist-credentials: false" "mirror workflow disables checkout credential persistence"
+  assert_contains "$(cat "$mirror_wf")" '"${GITHUB_REF}:${GITHUB_REF}"' "mirror workflow preserves annotated tag objects"
+  assert_contains "$(cat "$dockerfile")" "apk add --no-cache wget" "Dockerfile installs GNU wget on Alpine builder for mvnw --quiet"
 }
 
 test_10_dev_backup_quiesces_dev_app_and_parses_custom_db_name() {
@@ -518,6 +529,100 @@ test_10_dev_backup_quiesces_dev_app_and_parses_custom_db_name() {
   assert_contains "$bad_out" "Invalid" "reports invalid database identifier"
 }
 
+test_11_deploy_enforces_single_stack_exclusivity_and_ps_a_diagnostics() {
+  # Case A: deploy:dev blocked when prod stack is running without ALLOW_DEV_STOP_PROD=true
+  set +e
+  out_blocked=$(PATH="$MOCK_BIN:$PATH" MOCK_LOG="$MOCK_LOG" MOCK_PROD_OTHER_RUNNING=1 \
+    CI_REGISTRY_IMAGE=registry.gitlab.com/lakeserl/mini-banking \
+    DEV_DEPLOY_PORT=8080 DEV_POSTGRES_SUPER_PASSWORD=dummy \
+    DEV_DB_URL=jdbc:postgresql://postgres:5432/walletledger_dev \
+    DEV_DB_USERNAME=mb_dev DEV_DB_PASSWORD=dummy DEV_JWT_SECRET=dummy-secret-32-bytes-minimum-0000 \
+    IMAGE_TAG="dev-abc123" \
+    bash "$REPO_ROOT/scripts/ci-deploy.sh" dev 2>&1)
+  rc_blocked=$?
+  set -e
+  [ "$rc_blocked" -ne 0 ] || { echo "Expected deploy:dev to fail when prod is running"; return 1; }
+  assert_contains "$out_blocked" "docker compose -p mini-banking-prod down -t 35" "prints actionable prod stop hint"
+  assert_not_contains "$(cat "$MOCK_LOG")" "up -d" "must not start dev stack while prod runs"
+
+  # Case B: deploy:dev stops prod when ALLOW_DEV_STOP_PROD=true
+  : > "$MOCK_LOG"
+  PATH="$MOCK_BIN:$PATH" MOCK_LOG="$MOCK_LOG" MOCK_PROD_OTHER_RUNNING=1 ALLOW_DEV_STOP_PROD=true \
+    CI_REGISTRY_IMAGE=registry.gitlab.com/lakeserl/mini-banking \
+    DEV_DEPLOY_PORT=8080 DEV_POSTGRES_SUPER_PASSWORD=dummy \
+    DEV_DB_URL=jdbc:postgresql://postgres:5432/walletledger_dev \
+    DEV_DB_USERNAME=mb_dev DEV_DB_PASSWORD=dummy DEV_JWT_SECRET=dummy-secret-32-bytes-minimum-0000 \
+    IMAGE_TAG="dev-abc123" \
+    bash "$REPO_ROOT/scripts/ci-deploy.sh" dev >/dev/null
+  down_line="$(grep -n "compose -p mini-banking-prod down -t 35" "$MOCK_LOG" | head -n1 | cut -d: -f1)"
+  up_line="$(grep -n "docker-compose.dev.yml up -d" "$MOCK_LOG" | head -n1 | cut -d: -f1)"
+  [ -n "$down_line" ] && [ "$down_line" -lt "$up_line" ] || { echo "Expected prod down before dev up"; return 1; }
+
+  # Case C: deploy:prod stops active dev before up -d
+  : > "$MOCK_LOG"
+  PATH="$MOCK_BIN:$PATH" MOCK_LOG="$MOCK_LOG" MOCK_DEV_OTHER_RUNNING=1 \
+    CI_REGISTRY_IMAGE=registry.gitlab.com/lakeserl/mini-banking \
+    PROD_BACKUP_DIR="$TEST_TMP/backups/prod" PROD_DEPLOY_PORT=8081 \
+    PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
+    PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
+    PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    IMAGE_TAG="v1.0.0" \
+    bash "$REPO_ROOT/scripts/ci-deploy.sh" prod >/dev/null
+  p_down_line="$(grep -n "compose -p mini-banking down -t 35" "$MOCK_LOG" | head -n1 | cut -d: -f1)"
+  p_up_line="$(grep -n "docker-compose.prod.yml up -d" "$MOCK_LOG" | head -n1 | cut -d: -f1)"
+  [ -n "$p_down_line" ] && [ "$p_down_line" -lt "$p_up_line" ] || { echo "Expected dev down before prod up"; return 1; }
+
+  # Case D: readiness timeout inspects exited container using ps -a -q app
+  : > "$MOCK_LOG"
+  set +e
+  PATH="$MOCK_BIN:$PATH" MOCK_LOG="$MOCK_LOG" MOCK_CURL_FAIL=1 MOCK_DEV_APP_RUNNING=0 MOCK_DEV_APP_EXITED=1 \
+    READINESS_TIMEOUT_SECONDS=0 \
+    CI_REGISTRY_IMAGE=registry.gitlab.com/lakeserl/mini-banking \
+    DEV_DEPLOY_PORT=8080 DEV_POSTGRES_SUPER_PASSWORD=dummy \
+    DEV_DB_URL=jdbc:postgresql://postgres:5432/walletledger_dev \
+    DEV_DB_USERNAME=mb_dev DEV_DB_PASSWORD=dummy DEV_JWT_SECRET=dummy-secret-32-bytes-minimum-0000 \
+    IMAGE_TAG="dev-abc123" \
+    bash "$REPO_ROOT/scripts/ci-deploy.sh" dev >/dev/null 2>&1
+  rc_timeout=$?
+  set -e
+  [ "$rc_timeout" -ne 0 ] || { echo "Expected non-zero exit on readiness timeout"; return 1; }
+  diag_log="$(cat "$MOCK_LOG")"
+  assert_contains "$diag_log" "docker-compose.dev.yml ps -a -q app" "queries exited/created app containers with ps -a -q"
+  assert_contains "$diag_log" "dev-app-exited-cid" "inspects exited app container for ExitCode/OOMKilled"
+}
+
+test_12_backup_and_rollback_fail_loudly_when_docker_compose_ps_errors() {
+  # prod --online backup must NOT silently skip when docker compose ps fails
+  set +e
+  out_online=$(PATH="$MOCK_BIN:$PATH" MOCK_LOG="$MOCK_LOG" MOCK_COMPOSE_PS_FAIL=1 \
+    PROD_BACKUP_DIR="$TEST_TMP/backups/prod" \
+    PROD_POSTGRES_SUPER_USER=postgres PROD_POSTGRES_SUPER_PASSWORD=dummy \
+    PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
+    PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
+    PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    IMAGE_REF=registry.example/mini-banking:v1.0.0 \
+    bash "$REPO_ROOT/scripts/ci-backup.sh" prod --online 2>&1)
+  rc_online=$?
+  set -e
+  [ "$rc_online" -ne 0 ] || { echo "Expected non-zero exit on docker compose ps failure during online backup"; return 1; }
+  assert_not_contains "$out_online" "Skipping online prod backup" "must not report false-green skip on daemon error"
+
+  # rollback must NOT ignore docker compose ps errors
+  printf 'v1.0.0\n' > "$TEST_TMP/backups/prod/prod-last-known-good.tag"
+  set +e
+  out_rb=$(PATH="$MOCK_BIN:$PATH" MOCK_LOG="$MOCK_LOG" MOCK_COMPOSE_PS_FAIL=1 \
+    CI_REGISTRY_IMAGE=registry.gitlab.com/lakeserl/mini-banking \
+    PROD_BACKUP_DIR="$TEST_TMP/backups/prod" PROD_DEPLOY_PORT=8081 \
+    PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
+    PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
+    PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    bash "$REPO_ROOT/scripts/ci-rollback.sh" 2>&1)
+  rc_rb=$?
+  set -e
+  [ "$rc_rb" -ne 0 ] || { echo "Expected non-zero exit on docker compose ps failure during rollback"; return 1; }
+  assert_contains "$out_rb" "Cannot connect to the Docker daemon" "surfaces real docker daemon error"
+}
+
 run_case "1. dev backup fails fast when prod containers running (no prod vars)" test_1_dev_backup_blocked_when_prod_containers_running_without_prod_env_vars
 run_case "2. backup fails fast when disk < 2048 MB" test_2_backup_fails_when_disk_below_2048mb
 run_case "3. prod backup stops dev via -p, quiesces prod, verifies & rotates" test_3_prod_backup_stops_dev_without_dev_vars_quiesces_prod_verifies_and_rotates
@@ -526,8 +631,10 @@ run_case "5. prod migrate uses env-only + JAVA_TOOL_OPTIONS & revokes flyway his
 run_case "6. prod deploy dual-pointer rotation, no-clobber & dev exact-line prune" test_6_prod_deploy_dual_pointer_rotation_and_recovery_no_clobber
 run_case "7. prod rollback stops dev, handles port/digest images & rolls back live release" test_7_prod_rollback_stopped_app_stops_dev_and_rolls_back_live_release
 run_case "8. prod rollback fails cleanly on missing or 0-byte pointers" test_8_prod_rollback_fails_cleanly_on_missing_or_empty_pointers
-run_case "9. gitlab-ci, mirror workflow, grants & compose security invariants" test_9_gitlab_ci_and_compose_security_invariants
+run_case "9. gitlab-ci, mirror workflow, Dockerfile, grants & compose security invariants" test_9_gitlab_ci_and_compose_security_invariants
 run_case "10. dev backup quiesces dev app & parses/validates DB name from URL" test_10_dev_backup_quiesces_dev_app_and_parses_custom_db_name
+run_case "11. deploy enforces single-stack exclusivity & ps -a readiness diagnostics" test_11_deploy_enforces_single_stack_exclusivity_and_ps_a_diagnostics
+run_case "12. backup and rollback fail loudly on docker compose ps errors" test_12_backup_and_rollback_fail_loudly_when_docker_compose_ps_errors
 
 echo "=== Summary: $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [ "$FAIL_COUNT" -eq 0 ]

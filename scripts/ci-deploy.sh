@@ -11,6 +11,7 @@ fi
 
 if [ "$ENV_NAME" = "dev" ]; then
   COMPOSE_FILE="docker-compose.dev.yml"
+  OTHER_PROJECT="mini-banking-prod"
   DEPLOY_PORT="${DEV_DEPLOY_PORT:-8080}"
   IMAGE_TAG="${IMAGE_TAG:-dev-${CI_COMMIT_SHORT_SHA:-latest}}"
   export DEV_DEPLOY_PORT="$DEPLOY_PORT"
@@ -23,6 +24,7 @@ if [ "$ENV_NAME" = "dev" ]; then
   export CORS_ALLOWED_ORIGINS="${DEV_CORS_ALLOWED_ORIGINS:-http://localhost:3000}"
 else
   COMPOSE_FILE="docker-compose.prod.yml"
+  OTHER_PROJECT="mini-banking"
   DEPLOY_PORT="${PROD_DEPLOY_PORT:-8081}"
   BACKUP_DIR="${PROD_BACKUP_DIR:?Set PROD_BACKUP_DIR}"
   IMAGE_TAG="${IMAGE_TAG:-${CI_COMMIT_TAG:?Set IMAGE_TAG or CI_COMMIT_TAG}}"
@@ -38,6 +40,24 @@ fi
 
 REGISTRY_IMAGE="${CI_REGISTRY_IMAGE:?Set CI_REGISTRY_IMAGE}"
 export IMAGE_REF="${REGISTRY_IMAGE}:${IMAGE_TAG}"
+
+other_cids="$(docker compose -p "$OTHER_PROJECT" ps -q)"
+if [ "$ENV_NAME" = "dev" ]; then
+  if [ -n "$other_cids" ] && [ "${ALLOW_DEV_STOP_PROD:-false}" != "true" ]; then
+    echo "ERROR: prod stack is currently running on this 8GB host; refusing to stop prod automatically." >&2
+    echo "Run manually then Retry deploy:dev:" >&2
+    echo "  docker compose -p mini-banking-prod down -t 35" >&2
+    echo "(Or start a new pipeline with temporary variable ALLOW_DEV_STOP_PROD=true.)" >&2
+    exit 1
+  fi
+  if [ -n "$other_cids" ]; then
+    docker compose -p "$OTHER_PROJECT" down -t 35
+  fi
+else
+  if [ -n "$other_cids" ]; then
+    docker compose -p "$OTHER_PROJECT" down -t 35
+  fi
+fi
 
 logged_in=0
 cleanup_login() {
@@ -69,7 +89,7 @@ done
 
 if [ "$ready" -ne 1 ]; then
   echo "ERROR: ${ENV_NAME} readiness check failed after ${READINESS_TIMEOUT_SECONDS}s (${readiness_url})" >&2
-  app_cid="$(docker compose -f "$COMPOSE_FILE" ps -q app 2>/dev/null || true)"
+  app_cid="$(docker compose -f "$COMPOSE_FILE" ps -a -q app 2>/dev/null || true)"
   if [ -n "$app_cid" ]; then
     docker inspect --format 'Status={{.State.Status}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}' "$app_cid" >&2 || true
   fi

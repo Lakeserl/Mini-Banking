@@ -29,7 +29,7 @@ class OutboxSchemaTest {
 	@Test
 	void outboxHasExpectedColumns() {
 		assertThat(columns("outbox")).containsExactlyInAnyOrder("id", "event_id", "aggregate_id", "aggregate_type",
-				"event_type", "payload", "created_at", "published_at");
+				"aggregate_version", "event_type", "payload", "created_at", "published_at");
 	}
 
 	@Test

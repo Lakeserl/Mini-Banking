@@ -22,7 +22,7 @@ if [ -z "$target_tag" ]; then
   fi
 
   running_tag=""
-  app_cid="$(docker compose -p mini-banking-prod ps -q app 2>/dev/null || true)"
+  app_cid="$(docker compose -p mini-banking-prod ps -q app)"
   if [ -n "$app_cid" ]; then
     running_image="$(docker inspect --format '{{.Config.Image}}' "$app_cid" 2>/dev/null || true)"
     image_name="${running_image##*/}"
@@ -49,7 +49,7 @@ if [ -z "$target_tag" ]; then
   exit 1
 fi
 
-dev_cids="$(docker compose -p mini-banking ps -q 2>/dev/null || true)"
+dev_cids="$(docker compose -p mini-banking ps -q)"
 if [ -n "$dev_cids" ]; then
   docker compose -p mini-banking down -t 35
 fi

@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import com.lakeserl.mini_banking.query.api.CursorCodec.Cursor;
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssue;
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueAlreadyResolvedException;
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueNotFoundException;
@@ -29,6 +31,7 @@ class ReconciliationIssueRepositoryUnitTest {
 	private ReconciliationIssueRepository repository;
 	private final AtomicLong seq = new AtomicLong(0);
 	private final Map<Long, ReconciliationIssue> store = new LinkedHashMap<>();
+	private final List<String> capturedQuerySql = new ArrayList<>();
 
 	@BeforeEach
 	@SuppressWarnings("unchecked")
@@ -57,7 +60,11 @@ class ReconciliationIssueRepositoryUnitTest {
 
 		when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class))).thenAnswer(inv -> {
 			String sql = inv.getArgument(0);
+			capturedQuerySql.add(sql);
 			Object[] args = inv.getArguments();
+			if (sql.contains("FROM reconciliation_issues") && sql.contains("ORDER BY detected_at DESC")) {
+				return List.copyOf(store.values());
+			}
 			if (sql.contains("UPDATE reconciliation_issues")) {
 				Instant resolvedAt = ((OffsetDateTime) args[2]).toInstant();
 				String resolvedBy = (String) args[3];
@@ -115,5 +122,21 @@ class ReconciliationIssueRepositoryUnitTest {
 
 		assertThatThrownBy(() -> repository.resolve(1L, "admin-2", "again", now))
 				.isInstanceOf(ReconciliationIssueAlreadyResolvedException.class);
+	}
+
+	@Test
+	void sqlTemplatesPreserveWhitespaceBeforeColumnList() {
+		Instant now = Instant.parse("2026-11-24T04:00:00Z");
+		repository.openIfAbsent(ReconciliationIssueType.BALANCE_MISMATCH, "BAL:1", "{}", now);
+		capturedQuerySql.clear();
+
+		repository.findByStatus(ReconciliationIssueStatus.OPEN, null, 20);
+		repository.findByStatus(ReconciliationIssueStatus.OPEN, new Cursor(now, 10L), 20);
+		repository.resolve(1L, "admin-1", "fixed", now);
+
+		assertThat(capturedQuerySql).hasSize(3);
+		assertThat(capturedQuerySql.get(0)).contains("SELECT id,").doesNotContain("SELECTid");
+		assertThat(capturedQuerySql.get(1)).contains("SELECT id,").doesNotContain("SELECTid");
+		assertThat(capturedQuerySql.get(2)).contains("RETURNING id,").doesNotContain("RETURNINGid");
 	}
 }

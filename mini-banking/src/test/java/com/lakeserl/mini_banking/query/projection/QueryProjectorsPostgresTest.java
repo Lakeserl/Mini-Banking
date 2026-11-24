@@ -3,6 +3,8 @@ package com.lakeserl.mini_banking.query.projection;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -87,7 +89,12 @@ class QueryProjectorsPostgresTest {
 
 		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletVnd2, ownerA, Currency.VND), 1L, t1);
 		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletVnd1, ownerA, Currency.VND), 1L, t1);
-		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletUsd, ownerA, Currency.USD), 1L, t1);
+		// Seed USD directly into wallet_balances because BalanceProjector enforces VND-only events
+		// while QueryRepository.findBalancesByOwner must still order by (currency ASC, wallet_id ASC).
+		jdbc.update("""
+				INSERT INTO wallet_balances (wallet_id, owner_id, currency, balance, status, aggregate_version, updated_at)
+				VALUES (?, ?, 'USD', 0, 'ACTIVE', 1, ?)
+				""", walletUsd, ownerA, OffsetDateTime.ofInstant(t1, ZoneOffset.UTC));
 		balanceProjector.project(UUID.randomUUID(), new WalletOpened(walletB1, ownerB, Currency.VND), 1L, t1);
 
 		var ownerAWallets = queryRepository.findBalancesByOwner(ownerA);

@@ -54,16 +54,14 @@ public class ReconciliationIssueRepository {
 			resolved_at, resolved_by, resolution_notes
 			""";
 
-	private static final String SELECT_BY_STATUS_FIRST_SQL = """
-			SELECT """ + SELECT_COLUMNS + """
+	private static final String SELECT_BY_STATUS_FIRST_SQL = "SELECT " + SELECT_COLUMNS + """
 			FROM reconciliation_issues
 			WHERE status = ?
 			ORDER BY detected_at DESC, id DESC
 			LIMIT ?
 			""";
 
-	private static final String SELECT_BY_STATUS_CURSOR_SQL = """
-			SELECT """ + SELECT_COLUMNS + """
+	private static final String SELECT_BY_STATUS_CURSOR_SQL = "SELECT " + SELECT_COLUMNS + """
 			FROM reconciliation_issues
 			WHERE status = ?
 			  AND (detected_at, id) < (?, ?)
@@ -75,7 +73,7 @@ public class ReconciliationIssueRepository {
 			UPDATE reconciliation_issues
 			SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution_notes = ?
 			WHERE id = ? AND status = 'OPEN'
-			RETURNING """ + SELECT_COLUMNS;
+			""" + "RETURNING " + SELECT_COLUMNS;
 
 	private static final String SELECT_STATUS_SQL = "SELECT status FROM reconciliation_issues WHERE id = ?";
 
