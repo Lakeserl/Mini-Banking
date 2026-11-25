@@ -7,9 +7,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.regex.Pattern;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
@@ -19,12 +19,18 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
+import org.springframework.http.server.PathContainer;
+import org.springframework.http.server.RequestPath;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ContentCachingResponseWrapper;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
 
 import com.lakeserl.mini_banking.shared.api.ApiExceptionHandler.ErrorResponse;
 import com.lakeserl.mini_banking.shared.idempotency.IdempotencyService.Decision;
@@ -37,13 +43,19 @@ import tools.jackson.databind.json.JsonMapper;
  */
 public class IdempotencyFilter extends OncePerRequestFilter {
 
+	private static final Logger log = LoggerFactory.getLogger(IdempotencyFilter.class);
+
 	public static final String HEADER = "Idempotency-Key";
 	public static final int MAX_BODY_BYTES = 64 * 1024;
 	private static final int MAX_KEY_LENGTH = 100;
 	private static final int PAYLOAD_TOO_LARGE_STATUS = 413;
-	private static final Pattern IDEMPOTENT_PATH = Pattern
-			.compile("^/api/(wallets/[^/]+/(deposit|withdraw)|transfers(/[^/]+/refund)?)$");
-	private static final Pattern DEPOSIT_PATH = Pattern.compile("^/api/wallets/[^/]+/deposit$");
+	private static final PathPatternParser PATH_PARSER = PathPatternParser.defaultInstance;
+	private static final PathPattern DEPOSIT_PATH = PATH_PARSER.parse("/api/wallets/{id}/deposit");
+	private static final List<PathPattern> IDEMPOTENT_PATHS = List.of(
+			PATH_PARSER.parse("/api/transfers"),
+			PATH_PARSER.parse("/api/transfers/{id}/refund"),
+			DEPOSIT_PATH,
+			PATH_PARSER.parse("/api/wallets/{id}/withdraw"));
 
 	private final IdempotencyService idempotencyService;
 	private final JsonMapper mapper = JsonMapper.builder().build();
@@ -54,8 +66,19 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
 	@Override
 	protected boolean shouldNotFilter(HttpServletRequest request) {
-		return !"POST".equalsIgnoreCase(request.getMethod())
-				|| !IDEMPOTENT_PATH.matcher(request.getRequestURI()).matches();
+		if (!"POST".equalsIgnoreCase(request.getMethod())) {
+			return true;
+		}
+		PathContainer pathWithinApp = parsePathWithinApplication(request);
+		if (pathWithinApp == null) {
+			return true;
+		}
+		for (PathPattern pattern : IDEMPOTENT_PATHS) {
+			if (pattern.matches(pathWithinApp)) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	@Override
@@ -97,7 +120,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 					"Request body exceeds maximum allowed size of " + MAX_BODY_BYTES + " bytes");
 			return;
 		}
-		String hash = IdempotencyService.sha256(request.getMethod(), request.getRequestURI(), cachedRequest.body());
+		PathContainer pathWithinApp = parsePathWithinApplication(request);
+		String canonicalPath = pathWithinApp != null ? canonicalPath(pathWithinApp) : request.getRequestURI();
+		String hash = IdempotencyService.sha256(request.getMethod(), canonicalPath, cachedRequest.body());
 
 		Decision decision = idempotencyService.begin(userId, key, hash);
 		switch (decision) {
@@ -117,27 +142,66 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 			}
 			case Decision.Acquired(UUID leaseToken) -> {
 				ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
-				boolean handled = false;
+				boolean committed2xx = false;
 				try {
 					filterChain.doFilter(cachedRequest, wrappedResponse);
 					int status = wrappedResponse.getStatus();
 					if (status == HttpServletResponse.SC_ACCEPTED
-							&& DEPOSIT_PATH.matcher(request.getRequestURI()).matches()) {
-						idempotencyService.markPending(userId, key, leaseToken);
-						handled = true;
+							&& pathWithinApp != null
+							&& DEPOSIT_PATH.matches(pathWithinApp)) {
+						committed2xx = true;
+						try {
+							idempotencyService.markPending(userId, key, leaseToken);
+						} catch (RuntimeException persistEx) {
+							log.error("Failed to mark idempotency key pending after HTTP {} for user {}",
+									status, userId, persistEx);
+						}
 					} else if (status >= 200 && status < 300) {
+						committed2xx = true;
 						String body = new String(wrappedResponse.getContentAsByteArray(), StandardCharsets.UTF_8);
-						idempotencyService.complete(userId, key, leaseToken, status, body);
-						handled = true;
+						try {
+							idempotencyService.complete(userId, key, leaseToken, status, body);
+						} catch (RuntimeException persistEx) {
+							log.error("Failed to persist idempotency completion after HTTP {} for user {}",
+									status, userId, persistEx);
+						}
 					}
 				} finally {
-					if (!handled) {
-						idempotencyService.release(userId, key, leaseToken);
+					if (!committed2xx) {
+						try {
+							idempotencyService.release(userId, key, leaseToken);
+						} catch (RuntimeException releaseEx) {
+							log.error("Failed to release idempotency key for user {}", userId, releaseEx);
+						}
 					}
 					wrappedResponse.copyBodyToResponse();
 				}
 			}
 		}
+	}
+
+	private static PathContainer parsePathWithinApplication(HttpServletRequest request) {
+		String requestUri = request.getRequestURI();
+		if (requestUri == null) {
+			return null;
+		}
+		try {
+			return RequestPath.parse(requestUri, request.getContextPath()).pathWithinApplication();
+		} catch (IllegalArgumentException ex) {
+			return null;
+		}
+	}
+
+	private static String canonicalPath(PathContainer pathWithinApp) {
+		StringBuilder sb = new StringBuilder();
+		for (PathContainer.Element element : pathWithinApp.elements()) {
+			if (element instanceof PathContainer.PathSegment segment) {
+				sb.append(segment.valueToMatch());
+			} else {
+				sb.append(element.value());
+			}
+		}
+		return sb.toString();
 	}
 
 	private void writeJsonError(HttpServletResponse response, int status, String error, String message)

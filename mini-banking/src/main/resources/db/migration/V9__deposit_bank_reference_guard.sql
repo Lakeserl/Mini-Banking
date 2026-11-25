@@ -18,7 +18,7 @@ BEGIN
     FROM events
     WHERE aggregate_type = 'Deposit'
       AND event_type = 'DepositRequested'
-      AND octet_length(payload->>'bankReference') > 2000;
+      AND octet_length(UPPER(payload->>'bankReference')) > 2000;
 
     IF oversized_ids IS NOT NULL THEN
         RAISE EXCEPTION 'V9 migration blocked: DepositRequested bankReference exceeds 2000 bytes for deposit_id(s): %', oversized_ids;

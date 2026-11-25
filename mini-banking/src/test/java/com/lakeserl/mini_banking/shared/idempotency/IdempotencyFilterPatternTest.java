@@ -23,6 +23,16 @@ class IdempotencyFilterPatternTest {
 	}
 
 	@Test
+	void interceptsPercentEncodedMoneyMovingPostEndpoints() {
+		UUID id = UUID.randomUUID();
+
+		assertThat(filter.shouldNotFilter(request("POST", "/api/%74ransfers"))).isFalse();
+		assertThat(filter.shouldNotFilter(request("POST", "/api/transfers/" + id + "/%72efund"))).isFalse();
+		assertThat(filter.shouldNotFilter(request("POST", "/api/wallets/" + id + "/%64eposit"))).isFalse();
+		assertThat(filter.shouldNotFilter(request("POST", "/api/wallets/" + id + "/%77ithdraw"))).isFalse();
+	}
+
+	@Test
 	void skipsNonIdempotentOrNonPostEndpoints() {
 		UUID id = UUID.randomUUID();
 

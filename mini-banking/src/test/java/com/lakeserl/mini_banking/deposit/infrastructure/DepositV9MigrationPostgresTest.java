@@ -125,6 +125,30 @@ class DepositV9MigrationPostgresTest {
 		}
 	}
 
+	@Test
+	void failsFastWithDepositIdWhenUppercasedBankReferenceExceeds2000Bytes() throws Exception {
+		String schema = "v9_upper_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+		createSchema(schema);
+		try {
+			migrateSchema(schema, "8");
+
+			UUID walletId = UUID.randomUUID();
+			UUID depId = UUID.randomUUID();
+			// U+023F (2 bytes UTF-8) uppercases to U+2C7E (3 bytes UTF-8): 1000 chars = 2000B raw, 3000B upper
+			String expandingRef = "\u023F".repeat(1000);
+			OffsetDateTime t1 = OffsetDateTime.of(2026, 11, 20, 3, 0, 0, 0, ZoneOffset.UTC);
+
+			insertEvent(schema, depId, 1, new DepositRequested(depId, walletId, Money.vnd(100_000), expandingRef), t1);
+
+			assertThatThrownBy(() -> migrateSchema(schema, "9"))
+					.isInstanceOf(FlywayException.class)
+					.hasMessageContaining("exceeds 2000 bytes")
+					.hasMessageContaining(depId.toString());
+		} finally {
+			dropSchema(schema);
+		}
+	}
+
 	private void createSchema(String schema) throws Exception {
 		try (Connection conn = dataSource.getConnection(); Statement st = conn.createStatement()) {
 			st.execute("CREATE SCHEMA " + schema);
