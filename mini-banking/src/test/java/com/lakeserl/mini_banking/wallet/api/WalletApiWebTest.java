@@ -32,6 +32,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import com.lakeserl.mini_banking.deposit.command.DepositCommandHandler;
 import com.lakeserl.mini_banking.deposit.domain.DepositStatus;
+import com.lakeserl.mini_banking.deposit.domain.exceptions.DuplicateBankReferenceException;
 import com.lakeserl.mini_banking.mockbank.MockBankController;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway.BankTransaction;
@@ -231,6 +232,30 @@ class WalletApiWebTest {
 				.andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
 
 		verify(depositCommandHandler, never()).deposit(any(), any(), any(), any());
+	}
+
+	@Test
+	void depositWithDuplicateBankReferenceReturns409WithNeutralMessage() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
+		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
+
+		when(idempotencyService.begin(eq(ownerId), eq("key-dup-ref"), anyString())).thenReturn(new Decision.Acquired());
+		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
+		when(depositCommandHandler.deposit(any(), eq(walletId), eq(Money.vnd(100_000)), eq("REF-DUP-1")))
+				.thenThrow(new DuplicateBankReferenceException("REF-DUP-1"));
+
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
+						.header("Idempotency-Key", "key-dup-ref")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":100000,\"currency\":\"VND\",\"bankReference\":\"REF-DUP-1\"}"))
+				.andExpect(status().isConflict())
+				.andExpect(jsonPath("$.error").value("DUPLICATE_BANK_REFERENCE"))
+				.andExpect(jsonPath("$.message").value("Bank reference has already been used"));
+
+		verify(idempotencyService).release(ownerId, "key-dup-ref");
+		verify(idempotencyService, never()).complete(any(), any(), anyInt(), any());
 	}
 
 	@Test

@@ -9,6 +9,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import com.lakeserl.mini_banking.deposit.domain.exceptions.DuplicateBankReferenceException;
 import com.lakeserl.mini_banking.query.rebuild.ProjectionRebuildService.RebuildInProgressException;
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueAlreadyResolvedException;
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueNotFoundException;
@@ -64,6 +65,12 @@ public class ApiExceptionHandler {
 	ResponseEntity<ErrorResponse> handleLocked(WalletLockedException ex) {
 		return ResponseEntity.status(HttpStatus.CONFLICT)
 				.body(new ErrorResponse("WALLET_LOCKED", ex.getMessage()));
+	}
+
+	@ExceptionHandler(DuplicateBankReferenceException.class)
+	ResponseEntity<ErrorResponse> handleDuplicateBankReference(DuplicateBankReferenceException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(new ErrorResponse("DUPLICATE_BANK_REFERENCE", ex.getMessage()));
 	}
 
 	@ExceptionHandler(OptimisticConcurrencyException.class)

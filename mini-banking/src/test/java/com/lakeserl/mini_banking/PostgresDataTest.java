@@ -41,6 +41,7 @@ import com.lakeserl.mini_banking.shared.eventsourcing.PostgresSnapshotStore;
 		com.lakeserl.mini_banking.wallet.command.WalletCommandHandler.class,
 		com.lakeserl.mini_banking.deposit.infrastructure.DepositEventTypes.class,
 		com.lakeserl.mini_banking.deposit.infrastructure.DepositRepository.class,
+		com.lakeserl.mini_banking.deposit.infrastructure.DepositBankReferenceStore.class,
 		com.lakeserl.mini_banking.deposit.command.DepositCommandHandler.class,
 		com.lakeserl.mini_banking.withdrawal.infrastructure.WithdrawalEventTypes.class,
 		com.lakeserl.mini_banking.withdrawal.infrastructure.WithdrawalRepository.class,
