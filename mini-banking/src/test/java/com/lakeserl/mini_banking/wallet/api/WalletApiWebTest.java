@@ -152,7 +152,8 @@ class WalletApiWebTest {
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
 		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
 
-		when(idempotencyService.begin(eq(attackerId), eq("key-3"), anyString())).thenReturn(new Decision.Acquired());
+		UUID leaseToken = UUID.randomUUID();
+		when(idempotencyService.begin(eq(attackerId), eq("key-3"), anyString())).thenReturn(new Decision.Acquired(leaseToken));
 		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
 
 		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
@@ -164,8 +165,8 @@ class WalletApiWebTest {
 				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
 
 		verify(depositCommandHandler, never()).deposit(any(), any(), any(), any());
-		verify(idempotencyService).release(attackerId, "key-3");
-		verify(idempotencyService, never()).complete(any(), any(), anyInt(), any());
+		verify(idempotencyService).release(attackerId, "key-3", leaseToken);
+		verify(idempotencyService, never()).complete(any(), any(), any(), anyInt(), any());
 	}
 
 	@Test
@@ -173,8 +174,9 @@ class WalletApiWebTest {
 		UUID ownerId = UUID.randomUUID();
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
 		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
+		UUID leaseToken = UUID.randomUUID();
 
-		when(idempotencyService.begin(eq(ownerId), eq("key-4"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("key-4"), anyString())).thenReturn(new Decision.Acquired(leaseToken));
 		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
 		when(depositCommandHandler.deposit(any(), eq(walletId), eq(Money.vnd(100_000)), eq("REF-4")))
 				.thenReturn(DepositStatus.CONFIRMED);
@@ -187,7 +189,7 @@ class WalletApiWebTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("CONFIRMED"));
 
-		verify(idempotencyService).complete(eq(ownerId), eq("key-4"), eq(200), anyString());
+		verify(idempotencyService).complete(eq(ownerId), eq("key-4"), eq(leaseToken), eq(200), anyString());
 	}
 
 	@ParameterizedTest
@@ -203,7 +205,8 @@ class WalletApiWebTest {
 	void depositRejectsDisallowedBankReferenceWith400ValidationFailed(String jsonEscapedRef) throws Exception {
 		UUID ownerId = UUID.randomUUID();
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
-		when(idempotencyService.begin(eq(ownerId), eq("key-bad-ref"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("key-bad-ref"), anyString()))
+				.thenReturn(new Decision.Acquired(UUID.randomUUID()));
 
 		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
 						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
@@ -220,7 +223,8 @@ class WalletApiWebTest {
 	void depositRejectsBankReferenceOver100CharsWith400ValidationFailed() throws Exception {
 		UUID ownerId = UUID.randomUUID();
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
-		when(idempotencyService.begin(eq(ownerId), eq("key-101"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("key-101"), anyString()))
+				.thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		String ref101 = "R".repeat(101);
 
 		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
@@ -239,8 +243,10 @@ class WalletApiWebTest {
 		UUID ownerId = UUID.randomUUID();
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
 		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
+		UUID leaseToken = UUID.randomUUID();
 
-		when(idempotencyService.begin(eq(ownerId), eq("key-dup-ref"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("key-dup-ref"), anyString()))
+				.thenReturn(new Decision.Acquired(leaseToken));
 		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
 		when(depositCommandHandler.deposit(any(), eq(walletId), eq(Money.vnd(100_000)), eq("REF-DUP-1")))
 				.thenThrow(new DuplicateBankReferenceException("REF-DUP-1"));
@@ -254,8 +260,8 @@ class WalletApiWebTest {
 				.andExpect(jsonPath("$.error").value("DUPLICATE_BANK_REFERENCE"))
 				.andExpect(jsonPath("$.message").value("Bank reference has already been used"));
 
-		verify(idempotencyService).release(ownerId, "key-dup-ref");
-		verify(idempotencyService, never()).complete(any(), any(), anyInt(), any());
+		verify(idempotencyService).release(ownerId, "key-dup-ref", leaseToken);
+		verify(idempotencyService, never()).complete(any(), any(), any(), anyInt(), any());
 	}
 
 	@Test
@@ -264,7 +270,8 @@ class WalletApiWebTest {
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
 		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
 
-		when(idempotencyService.begin(eq(ownerId), eq("w-1"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("w-1"), anyString()))
+				.thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
 		when(withdrawalCommandHandler.withdraw(any(), eq(walletId), eq(Money.vnd(50_000)), eq("970436-111")))
 				.thenReturn(WithdrawalStatus.CONFIRMED);

@@ -7,7 +7,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.time.OffsetDateTime;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -44,6 +43,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 	private static final int PAYLOAD_TOO_LARGE_STATUS = 413;
 	private static final Pattern IDEMPOTENT_PATH = Pattern
 			.compile("^/api/(wallets/[^/]+/(deposit|withdraw)|transfers(/[^/]+/refund)?)$");
+	private static final Pattern DEPOSIT_PATH = Pattern.compile("^/api/wallets/[^/]+/deposit$");
 
 	private final IdempotencyService idempotencyService;
 	private final JsonMapper mapper = JsonMapper.builder().build();
@@ -115,28 +115,24 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 				response.setCharacterEncoding(StandardCharsets.UTF_8.name());
 				response.getWriter().write(body);
 			}
-			case Decision.Acquired(OffsetDateTime acquiredAt) -> {
+			case Decision.Acquired(UUID leaseToken) -> {
 				ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
-				boolean completed = false;
+				boolean handled = false;
 				try {
 					filterChain.doFilter(cachedRequest, wrappedResponse);
 					int status = wrappedResponse.getStatus();
-					if (status >= 200 && status < 300) {
+					if (status == HttpServletResponse.SC_ACCEPTED
+							&& DEPOSIT_PATH.matcher(request.getRequestURI()).matches()) {
+						idempotencyService.markPending(userId, key, leaseToken);
+						handled = true;
+					} else if (status >= 200 && status < 300) {
 						String body = new String(wrappedResponse.getContentAsByteArray(), StandardCharsets.UTF_8);
-						if (acquiredAt == null) {
-							idempotencyService.complete(userId, key, status, body);
-						} else {
-							idempotencyService.complete(userId, key, acquiredAt, status, body);
-						}
-						completed = true;
+						idempotencyService.complete(userId, key, leaseToken, status, body);
+						handled = true;
 					}
 				} finally {
-					if (!completed) {
-						if (acquiredAt == null) {
-							idempotencyService.release(userId, key);
-						} else {
-							idempotencyService.release(userId, key, acquiredAt);
-						}
+					if (!handled) {
+						idempotencyService.release(userId, key, leaseToken);
 					}
 					wrappedResponse.copyBodyToResponse();
 				}

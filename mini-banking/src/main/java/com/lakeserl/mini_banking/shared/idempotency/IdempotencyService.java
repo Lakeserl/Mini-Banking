@@ -3,7 +3,6 @@ package com.lakeserl.mini_banking.shared.idempotency;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
@@ -23,7 +22,8 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * HTTP-layer idempotency backing store (ADR-010).
  * Scoped by {@code (user_id, idempotency_key)} with SHA-256 request hashing, 24-hour TTL,
- * stale {@code IN_PROGRESS} lease reclaim, and periodic expired-key cleanup.
+ * 4-state lifecycle ({@code IN_PROGRESS}, {@code PENDING}, {@code RETRYING}, {@code COMPLETED}),
+ * mandatory UUID lease fencing, stale lease reclaim, and periodic expired-key cleanup.
  */
 @Service
 public class IdempotencyService {
@@ -32,9 +32,9 @@ public class IdempotencyService {
 	private static final Logger log = LoggerFactory.getLogger(IdempotencyService.class);
 
 	public sealed interface Decision {
-		record Acquired(OffsetDateTime acquiredAt) implements Decision {
-			public Acquired() {
-				this(null);
+		record Acquired(UUID leaseToken) implements Decision {
+			public Acquired {
+				Objects.requireNonNull(leaseToken, "leaseToken must not be null");
 			}
 		}
 
@@ -88,18 +88,36 @@ public class IdempotencyService {
 					       OR (status = 'IN_PROGRESS' AND created_at <= now() - make_interval(secs => ?)))
 					""", userId, idempotencyKey, (double) inProgressLeaseSeconds);
 
-			List<OffsetDateTime> created = jdbc.queryForList("""
-					INSERT INTO idempotency_keys (user_id, idempotency_key, request_hash, status, created_at, expires_at)
-					VALUES (?, ?, ?, 'IN_PROGRESS', now(), now() + interval '24 hours')
-					ON CONFLICT (user_id, idempotency_key) DO NOTHING
-					RETURNING created_at
-					""", OffsetDateTime.class, userId, idempotencyKey, requestHash);
+			jdbc.update("""
+					UPDATE idempotency_keys
+					SET status = 'PENDING', lease_token = NULL
+					WHERE user_id = ? AND idempotency_key = ?
+					  AND status = 'RETRYING'
+					  AND expires_at > now()
+					  AND created_at <= now() - make_interval(secs => ?)
+					""", userId, idempotencyKey, (double) inProgressLeaseSeconds);
 
-			if (!created.isEmpty()) {
-				return new Decision.Acquired(created.getFirst());
+			UUID leaseToken = UUID.randomUUID();
+			int inserted = jdbc.update("""
+					INSERT INTO idempotency_keys (user_id, idempotency_key, request_hash, status, lease_token, created_at, expires_at)
+					VALUES (?, ?, ?, 'IN_PROGRESS', ?, now(), now() + interval '24 hours')
+					ON CONFLICT (user_id, idempotency_key) DO NOTHING
+					""", userId, idempotencyKey, requestHash, leaseToken);
+			if (inserted == 1) {
+				return new Decision.Acquired(leaseToken);
 			}
 
-			return jdbc.queryForObject("""
+			int retried = jdbc.update("""
+					UPDATE idempotency_keys
+					SET status = 'RETRYING', lease_token = ?, created_at = now()
+					WHERE user_id = ? AND idempotency_key = ?
+					  AND status = 'PENDING' AND request_hash = ? AND expires_at > now()
+					""", leaseToken, userId, idempotencyKey, requestHash);
+			if (retried == 1) {
+				return new Decision.Acquired(leaseToken);
+			}
+
+			List<Decision> rows = jdbc.query("""
 					SELECT request_hash, status, response_payload::text
 					FROM idempotency_keys
 					WHERE user_id = ? AND idempotency_key = ?
@@ -107,60 +125,67 @@ public class IdempotencyService {
 				String existingHash = rs.getString("request_hash");
 				String rowStatus = rs.getString("status");
 				String payload = rs.getString("response_payload");
-				if ("IN_PROGRESS".equals(rowStatus)) {
+				if ("IN_PROGRESS".equals(rowStatus) || "RETRYING".equals(rowStatus)) {
 					return new Decision.InProgress();
 				}
 				if (!existingHash.equals(requestHash)) {
 					return new Decision.HashMismatch();
 				}
-				StoredResponse stored = mapper.readValue(payload, StoredResponse.class);
-				return new Decision.Completed(stored.status(), stored.body());
+				if ("COMPLETED".equals(rowStatus) && payload != null) {
+					StoredResponse stored = mapper.readValue(payload, StoredResponse.class);
+					return new Decision.Completed(stored.status(), stored.body());
+				}
+				return new Decision.InProgress();
 			}, userId, idempotencyKey);
+
+			return rows.isEmpty() ? new Decision.InProgress() : rows.getFirst();
 		});
 	}
 
-	public void complete(UUID userId, String idempotencyKey, int httpStatus, String responseBody) {
-		complete(userId, idempotencyKey, null, httpStatus, responseBody);
-	}
-
-	public void complete(UUID userId, String idempotencyKey, OffsetDateTime acquiredAt, int httpStatus,
-			String responseBody) {
+	public void markPending(UUID userId, String idempotencyKey, UUID leaseToken) {
 		Objects.requireNonNull(userId, "userId must not be null");
 		Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
+		Objects.requireNonNull(leaseToken, "leaseToken must not be null");
+		tx.executeWithoutResult(status -> jdbc.update("""
+				UPDATE idempotency_keys
+				SET status = 'PENDING', lease_token = NULL
+				WHERE user_id = ? AND idempotency_key = ?
+				  AND status IN ('IN_PROGRESS', 'RETRYING')
+				  AND lease_token = ?
+				""", userId, idempotencyKey, leaseToken));
+	}
+
+	public void complete(UUID userId, String idempotencyKey, UUID leaseToken, int httpStatus, String responseBody) {
+		Objects.requireNonNull(userId, "userId must not be null");
+		Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
+		Objects.requireNonNull(leaseToken, "leaseToken must not be null");
 		String json = mapper.writeValueAsString(new StoredResponse(httpStatus, responseBody == null ? "" : responseBody));
-		if (acquiredAt == null) {
-			tx.executeWithoutResult(status -> jdbc.update("""
-					UPDATE idempotency_keys
-					SET status = 'COMPLETED', response_payload = ?::jsonb
-					WHERE user_id = ? AND idempotency_key = ? AND status = 'IN_PROGRESS'
-					""", json, userId, idempotencyKey));
-		} else {
-			tx.executeWithoutResult(status -> jdbc.update("""
-					UPDATE idempotency_keys
-					SET status = 'COMPLETED', response_payload = ?::jsonb
-					WHERE user_id = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND created_at = ?
-					""", json, userId, idempotencyKey, acquiredAt));
-		}
+		tx.executeWithoutResult(status -> jdbc.update("""
+				UPDATE idempotency_keys
+				SET status = 'COMPLETED', response_payload = ?::jsonb, lease_token = NULL
+				WHERE user_id = ? AND idempotency_key = ?
+				  AND status IN ('IN_PROGRESS', 'RETRYING')
+				  AND lease_token = ?
+				""", json, userId, idempotencyKey, leaseToken));
 	}
 
-	public void release(UUID userId, String idempotencyKey) {
-		release(userId, idempotencyKey, null);
-	}
-
-	public void release(UUID userId, String idempotencyKey, OffsetDateTime acquiredAt) {
+	public void release(UUID userId, String idempotencyKey, UUID leaseToken) {
 		Objects.requireNonNull(userId, "userId must not be null");
 		Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
-		if (acquiredAt == null) {
-			tx.executeWithoutResult(status -> jdbc.update("""
+		Objects.requireNonNull(leaseToken, "leaseToken must not be null");
+		tx.executeWithoutResult(status -> {
+			jdbc.update("""
 					DELETE FROM idempotency_keys
-					WHERE user_id = ? AND idempotency_key = ? AND status = 'IN_PROGRESS'
-					""", userId, idempotencyKey));
-		} else {
-			tx.executeWithoutResult(status -> jdbc.update("""
-					DELETE FROM idempotency_keys
-					WHERE user_id = ? AND idempotency_key = ? AND status = 'IN_PROGRESS' AND created_at = ?
-					""", userId, idempotencyKey, acquiredAt));
-		}
+					WHERE user_id = ? AND idempotency_key = ?
+					  AND status = 'IN_PROGRESS' AND lease_token = ?
+					""", userId, idempotencyKey, leaseToken);
+			jdbc.update("""
+					UPDATE idempotency_keys
+					SET status = 'PENDING', lease_token = NULL
+					WHERE user_id = ? AND idempotency_key = ?
+					  AND status = 'RETRYING' AND lease_token = ?
+					""", userId, idempotencyKey, leaseToken);
+		});
 	}
 
 	@Scheduled(fixedDelayString = "${idempotency.cleanup.interval-ms:3600000}")

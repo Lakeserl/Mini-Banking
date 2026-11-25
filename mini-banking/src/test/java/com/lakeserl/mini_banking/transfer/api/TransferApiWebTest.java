@@ -83,7 +83,7 @@ class TransferApiWebTest {
 	void transferWithMissingSourceOrDestinationWalletIdReturns400ValidationFailed() throws Exception {
 		UUID userId = UUID.randomUUID();
 		UUID destId = UUID.randomUUID();
-		when(idempotencyService.begin(eq(userId), eq("t-val-1"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(userId), eq("t-val-1"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 
 		mockMvc.perform(post("/api/transfers")
 						.with(jwt().jwt(j -> j.subject(userId.toString())))
@@ -94,7 +94,7 @@ class TransferApiWebTest {
 				.andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
 
 		UUID sourceId = UUID.randomUUID();
-		when(idempotencyService.begin(eq(userId), eq("t-val-2"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(userId), eq("t-val-2"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		mockMvc.perform(post("/api/transfers")
 						.with(jwt().jwt(j -> j.subject(userId.toString())))
 						.header("Idempotency-Key", "t-val-2")
@@ -123,7 +123,7 @@ class TransferApiWebTest {
 		completed.markDebitCompleted();
 		completed.markCreditAndComplete();
 
-		when(idempotencyService.begin(eq(ownerId), eq("det-tx-key"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("det-tx-key"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(walletRepository.load(sourceId)).thenReturn(Optional.of(sourceWallet));
 		when(orchestrator.transfer(eq(expectedTransferId), eq(sourceId), eq(destId), eq(Money.vnd(100_000))))
 				.thenReturn(completed);
@@ -145,7 +145,7 @@ class TransferApiWebTest {
 				TransferType.REFUND, expectedTransferId);
 		nonTerminalRefund.markDebitCompleted();
 
-		when(idempotencyService.begin(eq(receiverId), eq("det-rf-key"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(receiverId), eq("det-rf-key"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(orchestrator.findTransfer(expectedTransferId)).thenReturn(Optional.of(completed));
 		when(walletRepository.load(destId)).thenReturn(Optional.of(destWallet));
 		when(orchestrator.refund(eq(expectedRefundId), eq(expectedTransferId))).thenReturn(nonTerminalRefund);
@@ -167,7 +167,9 @@ class TransferApiWebTest {
 		UUID destId = UUID.randomUUID();
 		Wallet sourceWallet = Wallet.open(sourceId, ownerId, Currency.VND);
 
-		when(idempotencyService.begin(eq(attackerId), eq("t-atk-1"), anyString())).thenReturn(new Decision.Acquired());
+		UUID leaseToken = UUID.randomUUID();
+		when(idempotencyService.begin(eq(attackerId), eq("t-atk-1"), anyString()))
+				.thenReturn(new Decision.Acquired(leaseToken));
 		when(walletRepository.load(sourceId)).thenReturn(Optional.of(sourceWallet));
 
 		mockMvc.perform(post("/api/transfers")
@@ -180,8 +182,8 @@ class TransferApiWebTest {
 				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
 
 		verify(orchestrator, never()).transfer(any(), any(), any(), any());
-		verify(idempotencyService).release(attackerId, "t-atk-1");
-		verify(idempotencyService, never()).complete(any(), any(), anyInt(), any());
+		verify(idempotencyService).release(attackerId, "t-atk-1", leaseToken);
+		verify(idempotencyService, never()).complete(any(), any(), any(), anyInt(), any());
 	}
 
 	@Test
@@ -194,7 +196,7 @@ class TransferApiWebTest {
 		when(walletRepository.load(sourceId)).thenReturn(Optional.of(sourceWallet));
 
 		// Terminal COMPLETED -> 200 OK
-		when(idempotencyService.begin(eq(ownerId), eq("t-ok-1"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("t-ok-1"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(orchestrator.transfer(any(), eq(sourceId), eq(destId), eq(Money.vnd(100_000))))
 				.thenAnswer(inv -> {
 					UUID transferId = inv.getArgument(0);
@@ -216,7 +218,7 @@ class TransferApiWebTest {
 				.andExpect(jsonPath("$.type").value("STANDARD"));
 
 		// Non-terminal DEBITED -> 202 Accepted
-		when(idempotencyService.begin(eq(ownerId), eq("t-acc-1"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(ownerId), eq("t-acc-1"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(orchestrator.transfer(any(), eq(sourceId), eq(destId), eq(Money.vnd(50_000))))
 				.thenAnswer(inv -> {
 					UUID transferId = inv.getArgument(0);
@@ -268,7 +270,7 @@ class TransferApiWebTest {
 		when(walletRepository.load(destId)).thenReturn(Optional.of(destWallet));
 
 		// Original sender -> 403 Forbidden
-		when(idempotencyService.begin(eq(senderId), eq("rf-sender"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(senderId), eq("rf-sender"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		mockMvc.perform(post("/api/transfers/{id}/refund", originalId)
 						.with(jwt().jwt(j -> j.subject(senderId.toString())))
 						.header("Idempotency-Key", "rf-sender"))
@@ -277,7 +279,7 @@ class TransferApiWebTest {
 		verify(orchestrator, never()).refund(any(), any());
 
 		// Original receiver -> 200 OK (no request body required)
-		when(idempotencyService.begin(eq(receiverId), eq("rf-recv"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(receiverId), eq("rf-recv"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(orchestrator.refund(any(), eq(originalId))).thenAnswer(inv -> {
 			UUID refundId = inv.getArgument(0);
 			Transfer rf = Transfer.initiate(refundId, destId, sourceId, Money.vnd(100_000),
@@ -302,7 +304,7 @@ class TransferApiWebTest {
 		adminOnlyOriginal.markDebitCompleted();
 		adminOnlyOriginal.markCreditAndComplete();
 		when(orchestrator.findTransfer(adminOnlyOriginalId)).thenReturn(Optional.of(adminOnlyOriginal));
-		when(idempotencyService.begin(eq(adminId), eq("rf-admin"), anyString())).thenReturn(new Decision.Acquired());
+		when(idempotencyService.begin(eq(adminId), eq("rf-admin"), anyString())).thenReturn(new Decision.Acquired(UUID.randomUUID()));
 		when(orchestrator.refund(any(), eq(adminOnlyOriginalId))).thenAnswer(inv -> {
 			UUID refundId = inv.getArgument(0);
 			Transfer rf = Transfer.initiate(refundId, missingDestWalletId, sourceId, Money.vnd(100_000),
