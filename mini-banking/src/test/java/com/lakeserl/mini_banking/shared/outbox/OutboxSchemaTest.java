@@ -35,7 +35,7 @@ class OutboxSchemaTest {
 	@Test
 	void idempotencyKeysHasExpectedColumns() {
 		assertThat(columns("idempotency_keys")).containsExactlyInAnyOrder("user_id", "idempotency_key", "request_hash",
-				"status", "response_payload", "created_at", "expires_at");
+				"status", "lease_token", "response_payload", "created_at", "expires_at");
 	}
 
 	@Test
