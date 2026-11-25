@@ -103,10 +103,12 @@ class TransferLedgerIntegrationTest {
 		UUID walletC = walletHandler.openWallet(UUID.randomUUID(), Currency.VND);
 
 		// 2. Confirmed deposit (+5,000,000) and rejected deposit into A
-		assertThat(depositHandler.deposit(UUID.randomUUID(), walletA, Money.vnd(5_000_000L), "DEP-OK-A"))
+		String depOkRef = "DEP-OK-A-" + UUID.randomUUID();
+		String depRejRef = "DEP-REJ-A-" + UUID.randomUUID();
+		assertThat(depositHandler.deposit(UUID.randomUUID(), walletA, Money.vnd(5_000_000L), depOkRef))
 				.isEqualTo(DepositStatus.CONFIRMED);
-		mockBank.presetDeposit("DEP-REJ-A", VerificationStatus.REJECTED);
-		assertThat(depositHandler.deposit(UUID.randomUUID(), walletA, Money.vnd(900_000L), "DEP-REJ-A"))
+		mockBank.presetDeposit(depRejRef, VerificationStatus.REJECTED);
+		assertThat(depositHandler.deposit(UUID.randomUUID(), walletA, Money.vnd(900_000L), depRejRef))
 				.isEqualTo(DepositStatus.FAILED);
 
 		// 3. Confirmed withdrawal (-1,000,000) and rejected/reversed withdrawal (-500,000 then +500,000) on A
@@ -222,7 +224,8 @@ class TransferLedgerIntegrationTest {
 	void midSagaDebitedStateHoldsClearingBalanceAndZeroesUponCompletion() {
 		UUID walletA = walletHandler.openWallet(UUID.randomUUID(), Currency.VND);
 		UUID walletB = walletHandler.openWallet(UUID.randomUUID(), Currency.VND);
-		assertThat(depositHandler.deposit(UUID.randomUUID(), walletA, Money.vnd(1_000_000L), "DEP-MID-A"))
+		assertThat(depositHandler.deposit(UUID.randomUUID(), walletA, Money.vnd(1_000_000L),
+				"DEP-MID-A-" + UUID.randomUUID()))
 				.isEqualTo(DepositStatus.CONFIRMED);
 
 		UUID transferId = UUID.randomUUID();

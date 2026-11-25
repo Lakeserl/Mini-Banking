@@ -57,7 +57,7 @@ class ReconciliationPostgresTest {
 	@Test
 	void internalAndBankReconciliationDetectMismatchesIdempotentlyAndAllowAdminResolve() {
 		UUID walletId = walletCommands.openWallet(UUID.randomUUID(), Currency.VND);
-		depositCommands.deposit(UUID.randomUUID(), walletId, Money.vnd(500_000), "RECON-DEP-1");
+		depositCommands.deposit(UUID.randomUUID(), walletId, Money.vnd(500_000), "RECON-DEP-" + UUID.randomUUID());
 		rebuildService.rebuildAll();
 
 		// Run once to establish baseline against any shared-container events from earlier tests
@@ -80,7 +80,7 @@ class ReconciliationPostgresTest {
 		Instant now = Instant.now();
 		LocalDate todayVn = now.atZone(BankReconciliationService.BANK_ZONE).toLocalDate();
 		mockBank.addStatementEntry(new BankStatementEntry(
-				"BANK-GHOST-1", "DEPOSIT", UUID.randomUUID(), Money.vnd(777_000), "SUCCESS", now));
+				"BANK-GHOST-" + UUID.randomUUID(), "DEPOSIT", UUID.randomUUID(), Money.vnd(777_000), "SUCCESS", now));
 		assertThat(bankReconciliation.reconcileDate(todayVn).issuesOpened()).isGreaterThanOrEqualTo(1);
 
 		var openIssues = issueRepository.findByStatus(ReconciliationIssueStatus.OPEN, null, 20);

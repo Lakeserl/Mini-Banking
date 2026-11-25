@@ -104,11 +104,12 @@ class TransferApiIntegrationTest {
 		UUID aliceWalletId = openWallet(aliceToken);
 		UUID bobWalletId = openWallet(bobToken);
 
+		String aliceRef = "REF-ALICE-" + UUID.randomUUID();
 		mockMvc.perform(post("/api/wallets/{id}/deposit", aliceWalletId)
 						.header(HttpHeaders.AUTHORIZATION, aliceToken)
 						.header("Idempotency-Key", "alice-dep-1")
 						.contentType(MediaType.APPLICATION_JSON)
-						.content("{\"amount\":500000,\"currency\":\"VND\",\"bankReference\":\"REF-ALICE-1\"}"))
+						.content("{\"amount\":500000,\"currency\":\"VND\",\"bankReference\":\"" + aliceRef + "\"}"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("CONFIRMED"));
 
