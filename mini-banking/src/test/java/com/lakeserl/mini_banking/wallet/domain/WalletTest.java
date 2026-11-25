@@ -284,7 +284,51 @@ class WalletTest {
 		assertThatThrownBy(() -> wallet.creditCompensation(tx, amount, null, AccountType.CLEARING)).isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> wallet.creditCompensation(tx, amount, "X", null)).isInstanceOf(NullPointerException.class);
 
+		assertThatThrownBy(() -> wallet.creditSettlement(null, amount, "BANK_SETTLEMENT")).isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> wallet.creditSettlement(tx, null, "BANK_SETTLEMENT")).isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> wallet.creditSettlement(tx, amount, null)).isInstanceOf(NullPointerException.class);
+
 		assertThatThrownBy(() -> wallet.debit(null, amount, "X", AccountType.CLEARING)).isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> wallet.lock(null)).isInstanceOf(NullPointerException.class);
+	}
+
+	@Test
+	void creditSettlementCreditsLockedWalletWithoutUnlockingAndKeepsDebitBlocked() {
+		Wallet wallet = newWallet();
+		credit(wallet, 100);
+		wallet.lock("compliance review");
+		UUID depositId = UUID.randomUUID();
+
+		wallet.creditSettlement(depositId, Money.vnd(250), "BANK_SETTLEMENT");
+
+		assertThat(wallet.balance()).isEqualTo(Money.vnd(350));
+		assertThat(wallet.status()).isEqualTo(WalletStatus.LOCKED);
+		var settlementEvent = wallet.uncommittedEvents().getLast();
+		assertThat(settlementEvent.eventId()).isEqualTo(Wallet.creditEventId(depositId, walletId));
+		assertThat(settlementEvent.event())
+				.isEqualTo(new WalletCredited(walletId, Money.vnd(250), depositId, "BANK_SETTLEMENT",
+						AccountType.SETTLEMENT));
+
+		assertThatThrownBy(() -> wallet.debit(UUID.randomUUID(), Money.vnd(50), "TRANSFER_CLEARING",
+				AccountType.CLEARING)).isInstanceOf(WalletLockedException.class);
+	}
+
+	@Test
+	void creditSettlementAlsoSucceedsOnActiveWalletAndRejectsInvalidAmounts() {
+		Wallet wallet = newWallet();
+		UUID depositId = UUID.randomUUID();
+
+		wallet.creditSettlement(depositId, Money.vnd(500), "BANK_SETTLEMENT");
+
+		assertThat(wallet.balance()).isEqualTo(Money.vnd(500));
+		assertThat(wallet.status()).isEqualTo(WalletStatus.ACTIVE);
+		assertThat(wallet.uncommittedEvents().get(1).eventId()).isEqualTo(Wallet.creditEventId(depositId, walletId));
+
+		assertThatThrownBy(() -> wallet.creditSettlement(UUID.randomUUID(), Money.vnd(0), "BANK_SETTLEMENT"))
+				.isInstanceOf(InvalidAmountException.class);
+		assertThatThrownBy(() -> wallet.creditSettlement(UUID.randomUUID(), new Money(10, Currency.USD), "BANK_SETTLEMENT"))
+				.isInstanceOf(CurrencyMismatchException.class);
+		assertThatThrownBy(() -> wallet.creditSettlement(UUID.randomUUID(), Money.vnd(10), "   "))
+				.isInstanceOf(IllegalArgumentException.class);
 	}
 }

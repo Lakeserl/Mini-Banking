@@ -186,6 +186,38 @@ class BankReconciliationServiceUnitTest {
 				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + lockedDep), anyString(), eq(NOW));
 	}
 
+	@Test
+	void stalePendingDepositAlreadyVerifiedSettlesWithoutOpeningIssueEvenWhenBankLookupIsEmpty() {
+		UUID verifiedDep = UUID.randomUUID();
+		UUID unresolvedDep = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Instant oldTime = NOW.minusSeconds(600);
+
+		when(mockBankGateway.getDailyStatement(REPORT_DATE, BankReconciliationService.BANK_ZONE))
+				.thenReturn(List.of());
+		when(queryRepository.findSettledBankTransactions(any(), any())).thenReturn(List.of());
+		when(queryRepository.findStalePendingDeposits(NOW.minusSeconds(300)))
+				.thenReturn(List.of(
+						txRow(verifiedDep, walletId, "DEPOSIT", 400_000L, "PENDING", "VERIFIED-EMPTY", oldTime),
+						txRow(unresolvedDep, walletId, "DEPOSIT", 150_000L, "PENDING", "UNKNOWN-EMPTY", oldTime)));
+		when(mockBankGateway.findTransaction("VERIFIED-EMPTY")).thenReturn(Optional.empty());
+		when(mockBankGateway.findTransaction("UNKNOWN-EMPTY")).thenReturn(Optional.empty());
+		when(depositCommandHandler.settleIfAlreadyVerified(verifiedDep, walletId, Money.vnd(400_000), "VERIFIED-EMPTY"))
+				.thenReturn(true);
+		when(depositCommandHandler.settleIfAlreadyVerified(unresolvedDep, walletId, Money.vnd(150_000), "UNKNOWN-EMPTY"))
+				.thenReturn(false);
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
+
+		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
+
+		assertThat(result.issuesOpened()).isEqualTo(1);
+		verify(depositCommandHandler).settleIfAlreadyVerified(verifiedDep, walletId, Money.vnd(400_000), "VERIFIED-EMPTY");
+		verify(depositCommandHandler).settleIfAlreadyVerified(unresolvedDep, walletId, Money.vnd(150_000), "UNKNOWN-EMPTY");
+		verify(depositCommandHandler, never()).deposit(eq(verifiedDep), any(), any(), any());
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
+				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + unresolvedDep), anyString(), eq(NOW));
+	}
+
 	private static TransactionHistoryRow txRow(UUID txId, UUID walletId, String txType, long amount,
 			String status, String bankRef, Instant occurredAt) {
 		return new TransactionHistoryRow(1L, txId, walletId, txType, "DEPOSIT".equals(txType) ? "IN" : "OUT",

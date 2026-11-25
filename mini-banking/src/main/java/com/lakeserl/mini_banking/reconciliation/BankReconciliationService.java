@@ -172,13 +172,13 @@ public class BankReconciliationService {
 		Instant cutoff = checkedAt.minusSeconds(pendingDepositThresholdSeconds);
 		for (TransactionHistoryRow pending : queryRepository.findStalePendingDeposits(cutoff)) {
 			String ref = pending.bankReference();
+			Money money = new Money(pending.amount(), Currency.valueOf(pending.currency()));
 			Optional<BankTransaction> bankTx = (ref == null || ref.isBlank())
 					? Optional.empty()
 					: mockBankGateway.findTransaction(ref);
 			if (bankTx.isPresent() && ("SUCCESS".equals(bankTx.get().status()) || "REJECTED".equals(bankTx.get().status()))) {
 				try {
-					depositCommandHandler.deposit(pending.transactionId(), pending.walletId(),
-							new Money(pending.amount(), Currency.valueOf(pending.currency())), ref);
+					depositCommandHandler.deposit(pending.transactionId(), pending.walletId(), money, ref);
 				} catch (RuntimeException ex) {
 					log.warn("Failed to settle stale pending deposit {}; opening reconciliation issue",
 							pending.transactionId(), ex);
@@ -193,13 +193,35 @@ public class BankReconciliationService {
 					}
 				}
 			} else {
-				if (openIssue("BANK_MISMATCH:PENDING_DEPOSIT:" + pending.transactionId(),
-						Map.of("kind", "PENDING_DEPOSIT_UNRESOLVED",
-								"depositId", pending.transactionId().toString(),
-								"walletId", pending.walletId().toString(),
-								"bankReference", ref != null ? ref : ""),
-						checkedAt)) {
-					opened++;
+				boolean settled = false;
+				if (ref != null && !ref.isBlank()) {
+					try {
+						settled = depositCommandHandler.settleIfAlreadyVerified(
+								pending.transactionId(), pending.walletId(), money, ref);
+					} catch (RuntimeException ex) {
+						log.warn("Failed to settle already-verified pending deposit {}; opening reconciliation issue",
+								pending.transactionId(), ex);
+						if (openIssue("BANK_MISMATCH:PENDING_DEPOSIT:" + pending.transactionId(),
+								Map.of("kind", "PENDING_DEPOSIT_SETTLE_FAILED",
+										"depositId", pending.transactionId().toString(),
+										"walletId", pending.walletId().toString(),
+										"bankReference", ref,
+										"error", ex.getClass().getSimpleName()),
+								checkedAt)) {
+							opened++;
+						}
+						continue;
+					}
+				}
+				if (!settled) {
+					if (openIssue("BANK_MISMATCH:PENDING_DEPOSIT:" + pending.transactionId(),
+							Map.of("kind", "PENDING_DEPOSIT_UNRESOLVED",
+									"depositId", pending.transactionId().toString(),
+									"walletId", pending.walletId().toString(),
+									"bankReference", ref != null ? ref : ""),
+							checkedAt)) {
+						opened++;
+					}
 				}
 			}
 		}

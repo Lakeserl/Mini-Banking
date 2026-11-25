@@ -154,6 +154,26 @@ public final class Wallet extends AggregateRoot {
 				transactionId, null);
 	}
 
+	/**
+	 * Credits a bank-verified deposit settlement. Allowed for {@code ACTIVE} or {@code LOCKED} wallets
+	 * so deposits verified before a mid-flight lock are not stranded; preserves {@code LOCKED} status.
+	 */
+	public void creditSettlement(UUID depositId, Money amount, String settlementAccount) {
+		Objects.requireNonNull(depositId, "depositId must not be null");
+		Objects.requireNonNull(amount, "amount must not be null");
+		Objects.requireNonNull(settlementAccount, "settlementAccount must not be null");
+		if (settlementAccount.isBlank()) {
+			throw new IllegalArgumentException("settlementAccount must not be blank");
+		}
+		if (status != WalletStatus.ACTIVE && status != WalletStatus.LOCKED) {
+			throw new IllegalStateException("Cannot credit wallet in status: " + status);
+		}
+		requireValidAmount(amount);
+		raise(creditEventId(depositId, walletId),
+				new WalletCredited(walletId, amount, depositId, settlementAccount, AccountType.SETTLEMENT),
+				depositId, null);
+	}
+
 	public void debit(UUID transactionId, Money amount, String counterpartAccountId, AccountType counterpartType) {
 		Objects.requireNonNull(transactionId, "transactionId must not be null");
 		Objects.requireNonNull(amount, "amount must not be null");

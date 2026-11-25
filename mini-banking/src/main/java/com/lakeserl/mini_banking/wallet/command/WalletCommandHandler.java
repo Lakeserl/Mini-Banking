@@ -111,6 +111,17 @@ public class WalletCommandHandler {
 				wallet -> wallet.creditCompensation(transactionId, amount, counterpartAccountId, counterpartType));
 	}
 
+	public ApplyResult creditSettlement(UUID walletId, UUID depositId, Money amount, String settlementAccount) {
+		Objects.requireNonNull(walletId, "walletId must not be null");
+		Objects.requireNonNull(depositId, "depositId must not be null");
+		Objects.requireNonNull(amount, "amount must not be null");
+		Objects.requireNonNull(settlementAccount, "settlementAccount must not be null");
+		DomainEvent expectedEvent = new WalletCredited(walletId, amount, depositId, settlementAccount,
+				AccountType.SETTLEMENT);
+		return apply(walletId, Wallet.creditEventId(depositId, walletId), expectedEvent,
+				wallet -> wallet.creditSettlement(depositId, amount, settlementAccount));
+	}
+
 	public ApplyResult debit(UUID walletId, UUID transactionId, Money amount, String counterpartAccountId,
 			AccountType counterpartType) {
 		Objects.requireNonNull(walletId, "walletId must not be null");
