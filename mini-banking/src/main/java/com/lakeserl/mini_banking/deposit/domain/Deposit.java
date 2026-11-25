@@ -3,7 +3,9 @@ package com.lakeserl.mini_banking.deposit.domain;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
+import com.lakeserl.mini_banking.deposit.domain.events.DepositBankVerified;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositConfirmed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositFailed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositRequested;
@@ -18,6 +20,9 @@ import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException
 /** Event-sourced cash-in lifecycle: PENDING -> CONFIRMED | FAILED. */
 public final class Deposit extends AggregateRoot {
 
+	public static final int MAX_BANK_REFERENCE_LENGTH = 100;
+
+	private static final Pattern BANK_REFERENCE_PATTERN = Pattern.compile("\\A[A-Za-z0-9._-]{1,100}\\z");
 	private static final UUID EVENT_ID_NAMESPACE = UUID.fromString("4a6e2d1b-9c31-4f8b-8a05-2d9f7b4c1e31");
 
 	private UUID depositId;
@@ -25,6 +30,7 @@ public final class Deposit extends AggregateRoot {
 	private Money amount;
 	private String bankReference;
 	private DepositStatus status;
+	private boolean bankVerified;
 	private String failureReason;
 
 	private Deposit() {
@@ -37,6 +43,12 @@ public final class Deposit extends AggregateRoot {
 		Objects.requireNonNull(bankReference, "bankReference must not be null");
 		if (bankReference.isBlank()) {
 			throw new IllegalArgumentException("bankReference must not be blank");
+		}
+		if (bankReference.length() > MAX_BANK_REFERENCE_LENGTH
+				|| !BANK_REFERENCE_PATTERN.matcher(bankReference).matches()) {
+			throw new IllegalArgumentException(
+					"bankReference must be 1.." + MAX_BANK_REFERENCE_LENGTH
+							+ " ASCII letters, digits, '.', '_', or '-'");
 		}
 		if (amount.currency() != Currency.VND) {
 			throw new IllegalArgumentException("Unsupported deposit currency: " + amount.currency());
@@ -79,10 +91,21 @@ public final class Deposit extends AggregateRoot {
 	private UUID depositIdFrom(DomainEvent event) {
 		return switch (event) {
 			case DepositRequested e -> e.depositId();
+			case DepositBankVerified e -> e.depositId();
 			case DepositConfirmed e -> e.depositId();
 			case DepositFailed e -> e.depositId();
 			default -> throw new IllegalArgumentException("Unknown deposit event: " + event.getClass());
 		};
+	}
+
+	public void markBankVerified() {
+		if (status == DepositStatus.FAILED) {
+			throw new IllegalStateException("Deposit " + depositId + " is already in terminal state FAILED");
+		}
+		if (bankVerified || status == DepositStatus.CONFIRMED) {
+			return;
+		}
+		raise(eventId(depositId, DepositBankVerified.class), new DepositBankVerified(depositId), depositId, null);
 	}
 
 	public void confirm() {
@@ -94,6 +117,9 @@ public final class Deposit extends AggregateRoot {
 		Objects.requireNonNull(reason, "reason must not be null");
 		if (reason.isBlank()) {
 			throw new IllegalArgumentException("reason must not be blank");
+		}
+		if (bankVerified) {
+			throw new IllegalStateException("Cannot fail bank-verified deposit " + depositId);
 		}
 		requirePending();
 		raise(eventId(depositId, DepositFailed.class), new DepositFailed(depositId, reason), depositId, null);
@@ -130,6 +156,10 @@ public final class Deposit extends AggregateRoot {
 		return status;
 	}
 
+	public boolean isBankVerified() {
+		return bankVerified;
+	}
+
 	public String failureReason() {
 		return failureReason;
 	}
@@ -155,6 +185,11 @@ public final class Deposit extends AggregateRoot {
 				bankReference = e.bankReference();
 				status = DepositStatus.PENDING;
 			}
+			case DepositBankVerified e -> {
+				requireInitialized(e.depositId());
+				requirePending();
+				bankVerified = true;
+			}
 			case DepositConfirmed e -> {
 				requireInitialized(e.depositId());
 				requirePending();
@@ -163,6 +198,9 @@ public final class Deposit extends AggregateRoot {
 			case DepositFailed e -> {
 				requireInitialized(e.depositId());
 				requirePending();
+				if (bankVerified) {
+					throw new IllegalStateException("Cannot fail bank-verified deposit " + depositId);
+				}
 				Objects.requireNonNull(e.reason(), "DepositFailed.reason must not be null");
 				status = DepositStatus.FAILED;
 				failureReason = e.reason();

@@ -19,6 +19,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
@@ -185,6 +187,50 @@ class WalletApiWebTest {
 				.andExpect(jsonPath("$.status").value("CONFIRMED"));
 
 		verify(idempotencyService).complete(eq(ownerId), eq("key-4"), eq(200), anyString());
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"REF-1\\u200B",
+			"\\uFEFFREF-1",
+			"REF\\u202E1",
+			"REF\\u00851",
+			" REF-1",
+			"REF-1 ",
+			"REF-1\\n"
+	})
+	void depositRejectsDisallowedBankReferenceWith400ValidationFailed(String jsonEscapedRef) throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
+		when(idempotencyService.begin(eq(ownerId), eq("key-bad-ref"), anyString())).thenReturn(new Decision.Acquired());
+
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
+						.header("Idempotency-Key", "key-bad-ref")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":100000,\"currency\":\"VND\",\"bankReference\":\"" + jsonEscapedRef + "\"}"))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+
+		verify(depositCommandHandler, never()).deposit(any(), any(), any(), any());
+	}
+
+	@Test
+	void depositRejectsBankReferenceOver100CharsWith400ValidationFailed() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
+		when(idempotencyService.begin(eq(ownerId), eq("key-101"), anyString())).thenReturn(new Decision.Acquired());
+		String ref101 = "R".repeat(101);
+
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
+						.header("Idempotency-Key", "key-101")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":100000,\"currency\":\"VND\",\"bankReference\":\"" + ref101 + "\"}"))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.error").value("VALIDATION_FAILED"));
+
+		verify(depositCommandHandler, never()).deposit(any(), any(), any(), any());
 	}
 
 	@Test

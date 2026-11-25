@@ -28,6 +28,7 @@ import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.lakeserl.mini_banking.deposit.domain.events.DepositBankVerified;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositConfirmed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositFailed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositRequested;
@@ -323,5 +324,30 @@ class TransactionHistoryProjectorUnitTest {
 				.hasMessageContaining(missingDepositId.toString());
 		assertThat(processed).doesNotContain(TransactionHistoryProjector.DEFAULT_CONSUMER_GROUP + ":" + eventId);
 		assertThat(dailyRows).isEmpty();
+	}
+
+	@Test
+	void depositBankVerifiedIsIdempotentNoOpKeepingStatusPendingUntilConfirmed() {
+		UUID depositId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		UUID verifiedEventId = UUID.randomUUID();
+		Instant t1 = Instant.parse("2026-11-21T08:00:00Z");
+		Instant t2 = Instant.parse("2026-11-21T08:00:05Z");
+		Instant t3 = Instant.parse("2026-11-21T08:00:10Z");
+		String legacy150 = "LEGACY-" + "X".repeat(143);
+
+		assertThat(projector.project(UUID.randomUUID(),
+				new DepositRequested(depositId, walletId, Money.vnd(500_000), legacy150), t1)).isTrue();
+		assertThat(projector.project(verifiedEventId, new DepositBankVerified(depositId), t2)).isTrue();
+		assertThat(projector.project(verifiedEventId, new DepositBankVerified(depositId), t2)).isFalse();
+
+		TxRow stillPending = txRows.get(depositId + ":" + walletId);
+		assertThat(stillPending.status()).isEqualTo("PENDING");
+		assertThat(stillPending.bankReference()).isEqualTo(legacy150);
+		assertThat(dailyRows).isEmpty();
+
+		assertThat(projector.project(UUID.randomUUID(), new DepositConfirmed(depositId), t3)).isTrue();
+		assertThat(txRows.get(depositId + ":" + walletId).status()).isEqualTo("CONFIRMED");
+		assertThat(dailyRows.get("2026-11-21:VND").deposit()).isEqualTo(500_000L);
 	}
 }

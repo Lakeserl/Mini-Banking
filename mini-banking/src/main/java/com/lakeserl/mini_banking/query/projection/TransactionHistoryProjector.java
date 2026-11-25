@@ -16,6 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.lakeserl.mini_banking.deposit.domain.events.DepositBankVerified;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositConfirmed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositFailed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositRequested;
@@ -134,6 +135,9 @@ public class TransactionHistoryProjector {
 						e.depositId(), e.walletId(), "DEPOSIT", "IN",
 						e.amount().amount(), e.amount().currency().name(), "PENDING",
 						null, "BANK_SETTLEMENT", e.bankReference(), null, ts, ts);
+				case DepositBankVerified ignored -> {
+					// Pre-settlement durability marker; status stays PENDING until DepositConfirmed.
+				}
 				case DepositConfirmed e -> {
 					updateStatus(e.depositId(), "CONFIRMED", null, null, ts);
 					incrementDailyReport(e.depositId(), occurredAt, ts);
@@ -216,6 +220,7 @@ public class TransactionHistoryProjector {
 	private static void validateEvent(DomainEvent event) {
 		switch (event) {
 			case DepositRequested e -> validateAmount(e.depositId(), e.walletId(), e.amount());
+			case DepositBankVerified e -> Objects.requireNonNull(e.depositId(), "depositId");
 			case DepositConfirmed e -> Objects.requireNonNull(e.depositId(), "depositId");
 			case DepositFailed e -> Objects.requireNonNull(e.depositId(), "depositId");
 			case WithdrawalRequested e -> validateAmount(e.withdrawalId(), e.walletId(), e.amount());
