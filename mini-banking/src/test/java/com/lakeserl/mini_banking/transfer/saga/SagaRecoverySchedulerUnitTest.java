@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Clock;
@@ -18,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -44,7 +47,6 @@ import com.lakeserl.mini_banking.transfer.domain.Transfer;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
-import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferEventTypes;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferRepository;
@@ -253,19 +255,25 @@ class SagaRecoverySchedulerUnitTest {
 
 		clock.advance(Duration.ofSeconds(31));
 
-		// Sweep 1 (attempt = 1 < 3): still failing -> stays DEBITED
+		// Sweep 1 (attempt = 1 < 3): still failing -> stays DEBITED and backs off for 30s
 		assertThat(scheduler.recoverOnce()).isEqualTo(1);
 		assertThat(transferRepository.load(transferId)).get().extracting(Transfer::status)
 				.isEqualTo(TransferStatus.DEBITED);
 		assertThat(sagaStateStore.findById(transferId)).get().extracting(TransferSagaStateStore.TransferSagaSummary::retryCount)
 				.isEqualTo(1);
+		assertThat(scheduler.recoverOnce()).isZero();
 
-		// Sweep 2 (attempt = 2 < 3): still failing -> stays DEBITED
+		clock.advance(Duration.ofSeconds(31));
+
+		// Sweep 2 (attempt = 2 < 3): still failing -> stays DEBITED and backs off for 30s
 		assertThat(scheduler.recoverOnce()).isEqualTo(1);
 		assertThat(transferRepository.load(transferId)).get().extracting(Transfer::status)
 				.isEqualTo(TransferStatus.DEBITED);
 		assertThat(sagaStateStore.findById(transferId)).get().extracting(TransferSagaStateStore.TransferSagaSummary::retryCount)
 				.isEqualTo(2);
+		assertThat(scheduler.recoverOnce()).isZero();
+
+		clock.advance(Duration.ofSeconds(31));
 
 		// Sweep 3 (attempt = 3 >= maxRetries): triggers compensation on sourceId -> REVERSED
 		assertThat(scheduler.recoverOnce()).isEqualTo(1);
@@ -293,15 +301,21 @@ class SagaRecoverySchedulerUnitTest {
 
 		clock.advance(Duration.ofSeconds(31));
 
-		// Sweep 1 (attempt = 1 < 3): stays INITIATED
+		// Sweep 1 (attempt = 1 < 3): stays INITIATED and backs off for 30s
 		assertThat(scheduler.recoverOnce()).isEqualTo(1);
 		assertThat(transferRepository.load(transferId)).get().extracting(Transfer::status)
 				.isEqualTo(TransferStatus.INITIATED);
+		assertThat(scheduler.recoverOnce()).isZero();
 
-		// Sweep 2 (attempt = 2 < 3): stays INITIATED
+		clock.advance(Duration.ofSeconds(31));
+
+		// Sweep 2 (attempt = 2 < 3): stays INITIATED and backs off for 30s
 		assertThat(scheduler.recoverOnce()).isEqualTo(1);
 		assertThat(transferRepository.load(transferId)).get().extracting(Transfer::status)
 				.isEqualTo(TransferStatus.INITIATED);
+		assertThat(scheduler.recoverOnce()).isZero();
+
+		clock.advance(Duration.ofSeconds(31));
 
 		// Sweep 3 (attempt = 3 >= maxRetries): marks FAILED
 		assertThat(scheduler.recoverOnce()).isEqualTo(1);
@@ -396,6 +410,21 @@ class SagaRecoverySchedulerUnitTest {
 				.isEqualTo(Money.vnd(300_000L));
 		assertThat(walletRepository.load(destId)).get().extracting(Wallet::balance)
 				.isEqualTo(Money.vnd(300_000L));
+	}
+
+	@Test
+	void recoverOnce_skipsResumeWhenIncrementRetryReturnsEmptyBecauseSagaConcurrentlyCompleted() {
+		TransferSagaStateStore raceStore = mock(TransferSagaStateStore.class);
+		TransferSagaOrchestrator spyOrchestrator = mock(TransferSagaOrchestrator.class);
+		UUID transferId = UUID.randomUUID();
+		when(raceStore.findStuck(any(Duration.class), anyInt()))
+				.thenReturn(List.of(new TransferSagaStateStore.StuckSaga(transferId, TransferStatus.DEBITED, 0)));
+		when(raceStore.incrementRetry(transferId)).thenReturn(OptionalInt.empty());
+		SagaRecoveryScheduler raceScheduler = new SagaRecoveryScheduler(
+				raceStore, spyOrchestrator, Duration.ofSeconds(30), 3, 50);
+
+		assertThat(raceScheduler.recoverOnce()).isZero();
+		verify(spyOrchestrator, never()).resume(any(UUID.class), anyInt(), anyInt());
 	}
 
 	@Test
@@ -593,17 +622,17 @@ class SagaRecoverySchedulerUnitTest {
 		}
 
 		@Override
-		public int incrementRetry(UUID transferId) {
+		public OptionalInt incrementRetry(UUID transferId) {
 			TransferSagaSummary existing = rows.get(transferId);
-			if (existing == null) {
-				throw new TransferNotFoundException(transferId);
+			if (existing == null || existing.status().isTerminal()) {
+				return OptionalInt.empty();
 			}
 			int next = existing.retryCount() + 1;
 			rows.put(transferId, new TransferSagaSummary(existing.transferId(), existing.sourceWalletId(),
 					existing.destinationWalletId(), existing.amount(), existing.currency(), existing.type(),
 					existing.originalTransferId(), existing.status(), next, existing.failureReason(),
-					existing.createdAt(), existing.updatedAt()));
-			return next;
+					existing.createdAt(), clock.instant()));
+			return OptionalInt.of(next);
 		}
 
 		@Override

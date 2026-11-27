@@ -12,6 +12,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -45,7 +47,6 @@ import com.lakeserl.mini_banking.transfer.domain.Transfer;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
-import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferEventTypes;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferRepository;
@@ -350,15 +351,21 @@ class TransferConcurrencyUnitTest {
 		}
 
 		@Override
-		public int incrementRetry(UUID transferId) {
-			TransferSagaSummary updated = rows.computeIfPresent(transferId, (id, existing) -> new TransferSagaSummary(
-					existing.transferId(), existing.sourceWalletId(), existing.destinationWalletId(), existing.amount(),
-					existing.currency(), existing.type(), existing.originalTransferId(), existing.status(),
-					existing.retryCount() + 1, existing.failureReason(), existing.createdAt(), existing.updatedAt()));
-			if (updated == null) {
-				throw new TransferNotFoundException(transferId);
-			}
-			return updated.retryCount();
+		public OptionalInt incrementRetry(UUID transferId) {
+			AtomicInteger nextAttempt = new AtomicInteger(-1);
+			rows.computeIfPresent(transferId, (id, existing) -> {
+				if (existing.status().isTerminal()) {
+					return existing;
+				}
+				int next = existing.retryCount() + 1;
+				nextAttempt.set(next);
+				return new TransferSagaSummary(
+						existing.transferId(), existing.sourceWalletId(), existing.destinationWalletId(),
+						existing.amount(), existing.currency(), existing.type(), existing.originalTransferId(),
+						existing.status(), next, existing.failureReason(), existing.createdAt(), clock.instant());
+			});
+			int attempt = nextAttempt.get();
+			return attempt < 0 ? OptionalInt.empty() : OptionalInt.of(attempt);
 		}
 
 		@Override

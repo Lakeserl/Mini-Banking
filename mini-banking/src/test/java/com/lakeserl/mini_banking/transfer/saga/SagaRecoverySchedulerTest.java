@@ -121,8 +121,8 @@ class SagaRecoverySchedulerTest {
 		});
 		walletHandler.debit(sourceId, transferId, Money.vnd(150_000L),
 				TransferSagaOrchestrator.TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING);
-		sagaStateStore.incrementRetry(transferId);
-		sagaStateStore.incrementRetry(transferId);
+		assertThat(sagaStateStore.incrementRetry(transferId)).hasValue(1);
+		assertThat(sagaStateStore.incrementRetry(transferId)).hasValue(2);
 		ageSagaRow(transferId, Duration.ofSeconds(45));
 
 		int processed = scheduler.recoverOnce();

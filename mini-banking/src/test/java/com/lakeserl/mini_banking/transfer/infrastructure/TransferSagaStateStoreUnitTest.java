@@ -22,6 +22,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -42,7 +43,6 @@ import com.lakeserl.mini_banking.shared.domain.Money;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
-import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.StuckSaga;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.TransferSagaSummary;
@@ -303,28 +303,37 @@ class TransferSagaStateStoreUnitTest {
 
 	@SuppressWarnings("unchecked")
 	@Test
-	void incrementRetryReturnsIncrementedCountWithoutMutatingUpdatedAtAndThrowsWhenMissing() throws Exception {
+	void incrementRetryUpdatesUpdatedAtGuardsNonTerminalStatusesAndReturnsEmptyWhenMissingOrTerminal() throws Exception {
 		UUID transferId = UUID.randomUUID();
+		OffsetDateTime expectedNow = OffsetDateTime.ofInstant(FIXED_NOW, ZoneOffset.UTC);
 		ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
 		ArgumentCaptor<RowMapper<Integer>> mapperCaptor = ArgumentCaptor.forClass(RowMapper.class);
-		when(jdbc.query(sqlCaptor.capture(), mapperCaptor.capture(), eq(transferId))).thenReturn(List.of(3));
+		when(jdbc.query(sqlCaptor.capture(), mapperCaptor.capture(), eq(expectedNow), eq(transferId)))
+				.thenReturn(List.of(3));
 
-		int retryCount = store.incrementRetry(transferId);
+		OptionalInt retryCount = store.incrementRetry(transferId);
 
-		assertThat(retryCount).isEqualTo(3);
+		assertThat(retryCount).isEqualTo(OptionalInt.of(3));
 		String sql = sqlCaptor.getValue();
 		assertThat(sql).contains("retry_count = retry_count + 1");
+		assertThat(sql).contains("updated_at = ?");
 		assertThat(sql).contains("RETURNING retry_count");
-		assertThat(sql).doesNotContain("updated_at");
+		for (TransferStatus status : TransferStatus.values()) {
+			if (!status.isTerminal()) {
+				assertThat(sql).contains("'" + status.name() + "'");
+			} else {
+				assertThat(sql).doesNotContain("'" + status.name() + "'");
+			}
+		}
 
 		ResultSet rs = mock(ResultSet.class);
 		when(rs.getInt("retry_count")).thenReturn(3);
 		assertThat(mapperCaptor.getValue().mapRow(rs, 0)).isEqualTo(3);
 
-		UUID missingId = UUID.randomUUID();
-		when(jdbc.query(anyString(), any(RowMapper.class), eq(missingId))).thenReturn(List.of());
-		assertThatThrownBy(() -> store.incrementRetry(missingId))
-				.isInstanceOf(TransferNotFoundException.class);
+		UUID missingOrTerminalId = UUID.randomUUID();
+		when(jdbc.query(anyString(), any(RowMapper.class), eq(expectedNow), eq(missingOrTerminalId)))
+				.thenReturn(List.of());
+		assertThat(store.incrementRetry(missingOrTerminalId)).isEmpty();
 	}
 
 	@SuppressWarnings("unchecked")

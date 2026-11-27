@@ -10,6 +10,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -30,7 +31,6 @@ import com.lakeserl.mini_banking.shared.domain.Money;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
-import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.StuckSaga;
 import com.lakeserl.mini_banking.transfer.infrastructure.TransferSagaStateStore.TransferSagaSummary;
@@ -258,7 +258,7 @@ class TransferSagaStateStoreTest {
 	}
 
 	@Test
-	void incrementRetryIncrementsCountWithoutMutatingUpdatedAt() {
+	void incrementRetryIncrementsCountAdvancesUpdatedAtAndReturnsEmptyWhenMissing() {
 		UUID transferId = UUID.randomUUID();
 		Instant originalUpdatedAt = clock.instant().minusSeconds(60);
 		insertRow(transferId, UUID.randomUUID(), UUID.randomUUID(), 10_000L, TransferType.STANDARD, null,
@@ -266,15 +266,59 @@ class TransferSagaStateStoreTest {
 
 		Instant persistedBefore = store.findById(transferId).orElseThrow().updatedAt();
 
-		assertThat(store.incrementRetry(transferId)).isEqualTo(1);
-		assertThat(store.incrementRetry(transferId)).isEqualTo(2);
+		assertThat(store.incrementRetry(transferId)).isEqualTo(OptionalInt.of(1));
+		assertThat(store.incrementRetry(transferId)).isEqualTo(OptionalInt.of(2));
 
 		TransferSagaSummary after = store.findById(transferId).orElseThrow();
 		assertThat(after.retryCount()).isEqualTo(2);
-		assertThat(after.updatedAt()).isEqualTo(persistedBefore);
+		assertThat(after.updatedAt()).isAfter(persistedBefore);
 
-		assertThatThrownBy(() -> store.incrementRetry(UUID.randomUUID()))
-				.isInstanceOf(TransferNotFoundException.class);
+		assertThat(store.incrementRetry(UUID.randomUUID())).isEmpty();
+	}
+
+	@Test
+	void incrementRetryIncrementsEveryNonTerminalStatusAndSkipsEveryTerminalStatus() {
+		for (TransferStatus status : TransferStatus.values()) {
+			UUID transferId = UUID.randomUUID();
+			Instant originalUpdatedAt = clock.instant().minusSeconds(90);
+			insertRow(transferId, UUID.randomUUID(), UUID.randomUUID(), 10_000L, TransferType.STANDARD, null,
+					status, originalUpdatedAt);
+			Instant persistedBefore = store.findById(transferId).orElseThrow().updatedAt();
+
+			OptionalInt result = store.incrementRetry(transferId);
+			TransferSagaSummary after = store.findById(transferId).orElseThrow();
+
+			if (!status.isTerminal()) {
+				assertThat(result).as("status=%s", status).isEqualTo(OptionalInt.of(1));
+				assertThat(after.retryCount()).as("status=%s", status).isEqualTo(1);
+				assertThat(after.updatedAt()).as("status=%s", status).isAfter(persistedBefore);
+			} else {
+				assertThat(result).as("status=%s", status).isEmpty();
+				assertThat(after.retryCount()).as("status=%s", status).isZero();
+				assertThat(after.updatedAt()).as("status=%s", status).isEqualTo(persistedBefore);
+			}
+		}
+	}
+
+	@Test
+	void incrementRetryPreventsHeadOfLineStarvationAcrossSmallBatchLimit() {
+		Instant now = clock.instant();
+		UUID firstStuck = UUID.randomUUID();
+		UUID secondStuck = UUID.randomUUID();
+		insertRow(firstStuck, UUID.randomUUID(), UUID.randomUUID(), 10_000L, TransferType.STANDARD, null,
+				TransferStatus.DEBITED, now.minusSeconds(120));
+		insertRow(secondStuck, UUID.randomUUID(), UUID.randomUUID(), 10_000L, TransferType.STANDARD, null,
+				TransferStatus.DEBITED, now.minusSeconds(90));
+
+		assertThat(store.findStuck(Duration.ofSeconds(30), 1))
+				.extracting(StuckSaga::transferId)
+				.containsExactly(firstStuck);
+
+		assertThat(store.incrementRetry(firstStuck)).isEqualTo(OptionalInt.of(1));
+
+		assertThat(store.findStuck(Duration.ofSeconds(30), 1))
+				.extracting(StuckSaga::transferId)
+				.containsExactly(secondStuck);
 	}
 
 	@Test

@@ -3,6 +3,7 @@ package com.lakeserl.mini_banking.transfer.saga;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalInt;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -83,8 +84,11 @@ public class SagaRecoveryScheduler {
 		int processed = 0;
 		for (StuckSaga stuck : stuckList) {
 			try {
-				int attempt = sagaStateStore.incrementRetry(stuck.transferId());
-				orchestrator.resume(stuck.transferId(), attempt, maxRetries);
+				OptionalInt attemptOpt = sagaStateStore.incrementRetry(stuck.transferId());
+				if (attemptOpt.isEmpty()) {
+					continue;
+				}
+				orchestrator.resume(stuck.transferId(), attemptOpt.getAsInt(), maxRetries);
 				processed++;
 			} catch (Exception ex) {
 				log.warn("Failed to recover stuck transfer saga {} (status={}, retryCount={}); continuing batch",

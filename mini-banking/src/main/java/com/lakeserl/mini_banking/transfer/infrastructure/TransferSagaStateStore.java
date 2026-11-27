@@ -5,10 +5,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.postgresql.util.PSQLException;
 import org.springframework.dao.DuplicateKeyException;
@@ -23,7 +26,6 @@ import com.lakeserl.mini_banking.shared.domain.Money;
 import com.lakeserl.mini_banking.transfer.domain.TransferStatus;
 import com.lakeserl.mini_banking.transfer.domain.TransferType;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
-import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferPolicyViolationException;
 
 /**
@@ -74,18 +76,27 @@ public class TransferSagaStateStore {
 			WHERE transfer_id = ?
 			""";
 
+	private static final String NON_TERMINAL_STATUS_SQL_LIST = Arrays.stream(TransferStatus.values())
+			.filter(status -> !status.isTerminal())
+			.map(status -> "'" + status.name() + "'")
+			.collect(Collectors.joining(", "));
+
 	private static final String FIND_STUCK = """
 			SELECT transfer_id, status, retry_count
 			FROM transfer_saga_state
-			WHERE status IN ('INITIATED', 'DEBITED', 'REVERSING')
+			WHERE status IN (""" + NON_TERMINAL_STATUS_SQL_LIST + """
+			)
 			  AND updated_at <= ?
 			ORDER BY updated_at ASC LIMIT ?
 			""";
 
 	private static final String INCREMENT_RETRY = """
 			UPDATE transfer_saga_state
-			SET retry_count = retry_count + 1
+			SET retry_count = retry_count + 1,
+			    updated_at = ?
 			WHERE transfer_id = ?
+			  AND status IN (""" + NON_TERMINAL_STATUS_SQL_LIST + """
+			)
 			RETURNING retry_count
 			""";
 
@@ -196,12 +207,11 @@ public class TransferSagaStateStore {
 		return jdbc.query(FIND_STUCK, STUCK_SAGA_ROW_MAPPER, cutoff, limit);
 	}
 
-	public int incrementRetry(UUID transferId) {
+	public OptionalInt incrementRetry(UUID transferId) {
 		Objects.requireNonNull(transferId, "transferId must not be null");
-		return jdbc.query(INCREMENT_RETRY, (rs, i) -> rs.getInt("retry_count"), transferId)
-				.stream()
-				.findFirst()
-				.orElseThrow(() -> new TransferNotFoundException(transferId));
+		OffsetDateTime now = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
+		List<Integer> rows = jdbc.query(INCREMENT_RETRY, (rs, i) -> rs.getInt("retry_count"), now, transferId);
+		return rows.isEmpty() ? OptionalInt.empty() : OptionalInt.of(rows.getFirst());
 	}
 
 	public long sumOutgoingLast24Hours(UUID sourceWalletId) {
