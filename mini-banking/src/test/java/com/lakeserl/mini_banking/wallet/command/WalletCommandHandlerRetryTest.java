@@ -231,4 +231,60 @@ class WalletCommandHandlerRetryTest {
 					verify(repository, times(2)).save(any(Wallet.class));
 				});
 	}
+
+	@Test
+	void applyReturnsAlreadyAppliedWhenFinalOptimisticRetryLosesToSameEventId() {
+		WalletCommandHandler handler = new WalletCommandHandler(repository, eventStore, 0);
+		UUID tx = UUID.randomUUID();
+		UUID eventId = Wallet.creditEventId(tx, walletId);
+		WalletCredited matchingEvent = new WalletCredited(walletId, Money.vnd(50), tx, "BANK_SETTLEMENT",
+				AccountType.SETTLEMENT);
+		StoredEvent stored = new StoredEvent(eventId, walletId, "Wallet", 2, "WalletCredited", 1,
+				Instant.now(), tx, null, matchingEvent);
+
+		when(eventStore.findEvent(eventId))
+				.thenReturn(Optional.empty())
+				.thenReturn(Optional.of(stored));
+		when(repository.load(walletId)).thenReturn(Optional.of(activeWallet()));
+		doThrow(new OptimisticConcurrencyException("conflict")).when(repository).save(any(Wallet.class));
+
+		ApplyResult result = handler.credit(walletId, tx, Money.vnd(50), "BANK_SETTLEMENT", AccountType.SETTLEMENT);
+
+		assertThat(result).isEqualTo(ApplyResult.ALREADY_APPLIED);
+		verify(repository, times(1)).save(any(Wallet.class));
+	}
+
+	@Test
+	void applyThrowsConflictingTransactionWhenFinalOptimisticRetryLosesToDifferentPayload() {
+		WalletCommandHandler handler = new WalletCommandHandler(repository, eventStore, 0);
+		UUID tx = UUID.randomUUID();
+		UUID eventId = Wallet.creditEventId(tx, walletId);
+		WalletCredited conflictingEvent = new WalletCredited(walletId, Money.vnd(999), tx, "BANK_SETTLEMENT",
+				AccountType.SETTLEMENT);
+		StoredEvent stored = new StoredEvent(eventId, walletId, "Wallet", 2, "WalletCredited", 1,
+				Instant.now(), tx, null, conflictingEvent);
+
+		when(eventStore.findEvent(eventId))
+				.thenReturn(Optional.empty())
+				.thenReturn(Optional.of(stored));
+		when(repository.load(walletId)).thenReturn(Optional.of(activeWallet()));
+		doThrow(new OptimisticConcurrencyException("conflict")).when(repository).save(any(Wallet.class));
+
+		assertThatThrownBy(() -> handler.credit(walletId, tx, Money.vnd(50), "BANK_SETTLEMENT", AccountType.SETTLEMENT))
+				.isInstanceOf(ConflictingTransactionException.class);
+		verify(repository, times(1)).save(any(Wallet.class));
+	}
+
+	@Test
+	void lockWalletSucceedsIdempotentlyWhenFinalOptimisticRetrySeesWalletAlreadyLocked() {
+		WalletCommandHandler handler = new WalletCommandHandler(repository, eventStore, 0);
+		when(repository.load(walletId))
+				.thenReturn(Optional.of(activeWallet()))
+				.thenReturn(Optional.of(lockedWallet()));
+		doThrow(new OptimisticConcurrencyException("conflict")).when(repository).save(any(Wallet.class));
+
+		handler.lockWallet(walletId, "fraud review");
+
+		verify(repository, times(1)).save(any(Wallet.class));
+	}
 }

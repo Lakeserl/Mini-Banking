@@ -18,6 +18,7 @@ import com.lakeserl.mini_banking.shared.eventsourcing.EventStore;
 import com.lakeserl.mini_banking.shared.eventsourcing.OptimisticConcurrencyException;
 import com.lakeserl.mini_banking.shared.eventsourcing.StoredEvent;
 import com.lakeserl.mini_banking.wallet.domain.Wallet;
+import com.lakeserl.mini_banking.wallet.domain.WalletStatus;
 import com.lakeserl.mini_banking.wallet.domain.events.WalletCredited;
 import com.lakeserl.mini_banking.wallet.domain.events.WalletDebited;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.ConflictingTransactionException;
@@ -149,6 +150,10 @@ public class WalletCommandHandler {
 				return;
 			} catch (OptimisticConcurrencyException e) {
 				if (retryCount >= maxOptimisticRetries) {
+					Optional<Wallet> reloaded = repository.load(walletId);
+					if (reloaded.isPresent() && reloaded.get().status() == WalletStatus.LOCKED) {
+						return;
+					}
 					throw e;
 				}
 			}
@@ -175,6 +180,11 @@ public class WalletCommandHandler {
 				return ApplyResult.ALREADY_APPLIED;
 			} catch (OptimisticConcurrencyException e) {
 				if (retryCount >= maxOptimisticRetries) {
+					Optional<StoredEvent> stored = eventStore.findEvent(eventId);
+					if (stored.isPresent()) {
+						verifySameEvent(stored.get(), expectedEvent);
+						return ApplyResult.ALREADY_APPLIED;
+					}
 					throw e;
 				}
 				// Loop: reload from fresh state on next iteration.
