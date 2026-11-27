@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.errors.InterruptException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
@@ -37,10 +38,10 @@ public class KafkaOutboxPublisher implements OutboxPublisher {
 		}
 		try {
 			kafka.send(record).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-		} catch (InterruptedException e) {
+		} catch (InterruptedException | InterruptException e) {
 			Thread.currentThread().interrupt();
 			throw new OutboxPublishException("Interrupted while publishing outbox message " + message.id(), e);
-		} catch (ExecutionException | TimeoutException e) {
+		} catch (ExecutionException | TimeoutException | RuntimeException e) {
 			throw new OutboxPublishException("Failed to publish outbox message " + message.id(), e);
 		}
 	}

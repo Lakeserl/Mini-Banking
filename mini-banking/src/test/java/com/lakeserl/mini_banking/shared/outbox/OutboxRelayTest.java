@@ -1,17 +1,25 @@
 package com.lakeserl.mini_banking.shared.outbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.KafkaException;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.lakeserl.mini_banking.PostgresDataTest;
@@ -120,5 +128,24 @@ class OutboxRelayTest {
 		OutboxRelay relay = new OutboxRelay(jdbc, tx, new FakePublisher(), 100);
 
 		assertThat(relay.relayOnce()).isZero();
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void relayCommitsEarlierRowsWhenLaterRowThrowsSynchronousKafkaException() {
+		List<Long> ids = insertRows(2);
+		KafkaTemplate<String, String> kafkaTemplate = mock(KafkaTemplate.class);
+		when(kafkaTemplate.send(any(ProducerRecord.class)))
+				.thenReturn(CompletableFuture.completedFuture(mock(SendResult.class)))
+				.thenThrow(new KafkaException("metadata timeout"));
+		OutboxRelay relay = new OutboxRelay(jdbc, tx, new KafkaOutboxPublisher(kafkaTemplate), 100);
+
+		assertThat(relay.relayOnce()).isEqualTo(1);
+		OffsetDateTime firstPublishedAt = jdbc.queryForObject(
+				"SELECT published_at FROM outbox WHERE id = ?", OffsetDateTime.class, ids.get(0));
+		OffsetDateTime secondPublishedAt = jdbc.queryForObject(
+				"SELECT published_at FROM outbox WHERE id = ?", OffsetDateTime.class, ids.get(1));
+		assertThat(firstPublishedAt).isNotNull();
+		assertThat(secondPublishedAt).isNull();
 	}
 }

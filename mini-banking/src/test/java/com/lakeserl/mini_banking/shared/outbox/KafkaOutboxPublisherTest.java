@@ -13,8 +13,10 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.errors.InterruptException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 
@@ -80,6 +82,37 @@ class KafkaOutboxPublisherTest {
 
 		assertThatThrownBy(() -> publisher.publish(msg))
 				.isInstanceOf(OutboxPublishException.class);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void publishWrapsSynchronousKafkaExceptionInOutboxPublishException() {
+		OutboxMessage msg = new OutboxMessage(5L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}",
+				Instant.parse("2026-11-19T10:30:00Z"));
+		KafkaException syncFailure = new KafkaException("metadata timeout");
+		when(kafka.send(any(ProducerRecord.class))).thenThrow(syncFailure);
+
+		assertThatThrownBy(() -> publisher.publish(msg))
+				.isInstanceOf(OutboxPublishException.class)
+				.hasCause(syncFailure);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void publishRestoresInterruptFlagAndWrapsKafkaInterruptException() {
+		OutboxMessage msg = new OutboxMessage(6L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}",
+				Instant.parse("2026-11-19T10:30:00Z"));
+		InterruptException interruptFailure = new InterruptException("interrupted");
+		when(kafka.send(any(ProducerRecord.class))).thenThrow(interruptFailure);
+		Thread.interrupted();
+		try {
+			assertThatThrownBy(() -> publisher.publish(msg))
+					.isInstanceOf(OutboxPublishException.class)
+					.hasCause(interruptFailure);
+			assertThat(Thread.currentThread().isInterrupted()).isTrue();
+		} finally {
+			Thread.interrupted();
+		}
 	}
 
 	@Test
