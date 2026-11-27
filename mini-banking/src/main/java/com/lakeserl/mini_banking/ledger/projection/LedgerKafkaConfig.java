@@ -1,5 +1,6 @@
 package com.lakeserl.mini_banking.ledger.projection;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
@@ -30,7 +31,11 @@ public class LedgerKafkaConfig {
 		}
 		DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
 				kafkaTemplate,
-				(record, ex) -> new TopicPartition(record.topic() + DLT_SUFFIX, record.partition()));
+				LedgerKafkaConfig::resolveDltDestination);
 		return new DefaultErrorHandler(recoverer, new FixedBackOff(retryBackoffMs, MAX_RETRIES));
+	}
+
+	static TopicPartition resolveDltDestination(ConsumerRecord<?, ?> record, Exception ex) {
+		return new TopicPartition(record.topic() + DLT_SUFFIX, -1);
 	}
 }
