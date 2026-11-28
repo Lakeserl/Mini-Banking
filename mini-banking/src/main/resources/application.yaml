@@ -77,7 +77,10 @@ reconciliation:
   bank:
     enabled: true
     cron: "0 15 0 * * *"
+    pending-cron: "0 */5 * * * *"
     pending-deposit-threshold-seconds: 300
+    pending-escalation-threshold-seconds: 86400
+    failed-withdrawal-lookback-days: 7
 
 management:
   endpoint:

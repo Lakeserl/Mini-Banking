@@ -1,6 +1,7 @@
 package com.lakeserl.mini_banking.reconciliation;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -10,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -21,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.lakeserl.mini_banking.deposit.command.DepositCommandHandler;
+import com.lakeserl.mini_banking.deposit.domain.DepositStatus;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway.BankStatementEntry;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway.BankTransaction;
@@ -28,6 +31,8 @@ import com.lakeserl.mini_banking.query.api.QueryRepository;
 import com.lakeserl.mini_banking.query.api.QueryRepository.TransactionHistoryRow;
 import com.lakeserl.mini_banking.reconciliation.InternalReconciliationService.ReconciliationRunResult;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.withdrawal.command.WithdrawalCommandHandler;
+import com.lakeserl.mini_banking.withdrawal.command.WithdrawalCommandHandler.ReconcileOutcome;
 
 class BankReconciliationServiceUnitTest {
 
@@ -37,6 +42,7 @@ class BankReconciliationServiceUnitTest {
 	private MockBankGateway mockBankGateway;
 	private QueryRepository queryRepository;
 	private DepositCommandHandler depositCommandHandler;
+	private WithdrawalCommandHandler withdrawalCommandHandler;
 	private ReconciliationIssueRepository issueRepository;
 	private BankReconciliationService service;
 
@@ -45,9 +51,28 @@ class BankReconciliationServiceUnitTest {
 		mockBankGateway = mock(MockBankGateway.class);
 		queryRepository = mock(QueryRepository.class);
 		depositCommandHandler = mock(DepositCommandHandler.class);
+		withdrawalCommandHandler = mock(WithdrawalCommandHandler.class);
 		issueRepository = mock(ReconciliationIssueRepository.class);
+		when(queryRepository.findStalePendingDeposits(any())).thenReturn(List.of());
+		when(queryRepository.findStalePendingWithdrawals(any())).thenReturn(List.of());
+		when(queryRepository.findFailedWithdrawalsBetween(any(), any())).thenReturn(List.of());
+		when(mockBankGateway.findPayout(any())).thenReturn(Optional.empty());
 		service = new BankReconciliationService(mockBankGateway, queryRepository, depositCommandHandler,
-				issueRepository, Clock.fixed(NOW, ZoneOffset.UTC), false, 300L);
+				withdrawalCommandHandler, issueRepository, Clock.fixed(NOW, ZoneOffset.UTC), false,
+				300L, 86_400L, 7);
+	}
+
+	@Test
+	void constructorRejectsInvalidThresholdsAndLookback() {
+		assertThatThrownBy(() -> new BankReconciliationService(mockBankGateway, queryRepository, depositCommandHandler,
+				withdrawalCommandHandler, issueRepository, Clock.fixed(NOW, ZoneOffset.UTC), false, 300L, 86_400L, 0))
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> new BankReconciliationService(mockBankGateway, queryRepository, depositCommandHandler,
+				withdrawalCommandHandler, issueRepository, Clock.fixed(NOW, ZoneOffset.UTC), false, -1L, 86_400L, 7))
+				.isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> new BankReconciliationService(mockBankGateway, queryRepository, depositCommandHandler,
+				withdrawalCommandHandler, issueRepository, Clock.fixed(NOW, ZoneOffset.UTC), false, 300L, -1L, 7))
+				.isInstanceOf(IllegalArgumentException.class);
 	}
 
 	@Test
@@ -65,7 +90,6 @@ class BankReconciliationServiceUnitTest {
 				.thenReturn(List.of(
 						txRow(depId, walletId, "DEPOSIT", 500_000L, "CONFIRMED", "DEP-1", txTime),
 						txRow(wdrId, walletId, "WITHDRAWAL", 200_000L, "CONFIRMED", "PAY-1", txTime)));
-		when(queryRepository.findStalePendingDeposits(any())).thenReturn(List.of());
 
 		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
 
@@ -93,7 +117,6 @@ class BankReconciliationServiceUnitTest {
 						txRow(depMatch, walletId, "DEPOSIT", 100_000L, "CONFIRMED", "DUP-REF", txTime),
 						txRow(depMismatch, walletId, "DEPOSIT", 500_000L, "CONFIRMED", "MISMATCH-REF", txTime),
 						txRow(depMissingInBank, walletId, "DEPOSIT", 400_000L, "CONFIRMED", "SYS-ONLY-REF", txTime)));
-		when(queryRepository.findStalePendingDeposits(any())).thenReturn(List.of());
 		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
 
 		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
@@ -110,11 +133,13 @@ class BankReconciliationServiceUnitTest {
 	}
 
 	@Test
-	void stalePendingDepositsAreReverifiedWithBankOrFlaggedWhenStillUnresolved() {
+	void stalePendingDepositsEscalateOnlyPast24hAndAutoResolveWhenSettled() {
 		UUID resolvedDep = UUID.randomUUID();
-		UUID unresolvedDep = UUID.randomUUID();
+		UUID youngUnresolvedDep = UUID.randomUUID();
+		UUID oldUnresolvedDep = UUID.randomUUID();
 		UUID walletId = UUID.randomUUID();
-		Instant oldTime = NOW.minusSeconds(600);
+		Instant youngTime = NOW.minusSeconds(600);
+		Instant oldTime = NOW.minusSeconds(90_000);
 
 		when(mockBankGateway.getDailyStatement(REPORT_DATE, BankReconciliationService.BANK_ZONE))
 				.thenReturn(List.of());
@@ -122,20 +147,117 @@ class BankReconciliationServiceUnitTest {
 		when(queryRepository.findStalePendingDeposits(NOW.minusSeconds(300)))
 				.thenReturn(List.of(
 						txRow(resolvedDep, walletId, "DEPOSIT", 200_000L, "PENDING", "PEND-OK", oldTime),
-						txRow(unresolvedDep, walletId, "DEPOSIT", 300_000L, "PENDING", "PEND-STUCK", oldTime)));
+						txRow(youngUnresolvedDep, walletId, "DEPOSIT", 250_000L, "PENDING", "PEND-YOUNG", youngTime),
+						txRow(oldUnresolvedDep, walletId, "DEPOSIT", 300_000L, "PENDING", "PEND-OLD", oldTime)));
 		when(mockBankGateway.findTransaction("PEND-OK")).thenReturn(Optional.of(
 				new BankTransaction("PEND-OK", "DEPOSIT", resolvedDep, Money.vnd(200_000), "SUCCESS", null, oldTime)));
-		when(mockBankGateway.findTransaction("PEND-STUCK")).thenReturn(Optional.of(
-				new BankTransaction("PEND-STUCK", "DEPOSIT", unresolvedDep, Money.vnd(300_000), "TIMEOUT", "timeout", oldTime)));
+		when(mockBankGateway.findTransaction("PEND-YOUNG")).thenReturn(Optional.of(
+				new BankTransaction("PEND-YOUNG", "DEPOSIT", youngUnresolvedDep, Money.vnd(250_000), "TIMEOUT", "timeout", youngTime)));
+		when(mockBankGateway.findTransaction("PEND-OLD")).thenReturn(Optional.of(
+				new BankTransaction("PEND-OLD", "DEPOSIT", oldUnresolvedDep, Money.vnd(300_000), "TIMEOUT", "timeout", oldTime)));
+		when(depositCommandHandler.deposit(resolvedDep, walletId, Money.vnd(200_000), "PEND-OK"))
+				.thenReturn(DepositStatus.CONFIRMED);
 		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
 
 		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
 
 		assertThat(result.issuesOpened()).isEqualTo(1);
 		verify(depositCommandHandler).deposit(resolvedDep, walletId, Money.vnd(200_000), "PEND-OK");
-		verify(depositCommandHandler, never()).deposit(eq(unresolvedDep), any(), any(), any());
+		verify(issueRepository).resolveOpenByDedupeKey(eq("BANK_MISMATCH:PENDING_DEPOSIT:" + resolvedDep),
+				eq(BankReconciliationService.AUTO_RESOLVED_BY), anyString(), eq(NOW));
+		verify(issueRepository, never()).openIfAbsent(any(), eq("BANK_MISMATCH:PENDING_DEPOSIT:" + youngUnresolvedDep),
+				anyString(), any());
 		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
-				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + unresolvedDep), anyString(), eq(NOW));
+				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + oldUnresolvedDep), anyString(), eq(NOW));
+	}
+
+	@Test
+	void fiveMinutePendingRunDoesNotOpenIssuesForUnresolvedTimeoutsButSettlesAndAutoResolves() {
+		UUID settledDep = UUID.randomUUID();
+		UUID timeoutDep = UUID.randomUUID();
+		UUID settledWdr = UUID.randomUUID();
+		UUID timeoutWdr = UUID.randomUUID();
+		UUID mismatchWdr = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Instant veryOld = NOW.minusSeconds(100_000);
+
+		when(queryRepository.findStalePendingDeposits(NOW.minusSeconds(300)))
+				.thenReturn(List.of(
+						txRow(settledDep, walletId, "DEPOSIT", 100_000L, "PENDING", "DEP-SETTLED", veryOld),
+						txRow(timeoutDep, walletId, "DEPOSIT", 120_000L, "PENDING", "DEP-TIMEOUT", veryOld)));
+		when(mockBankGateway.findTransaction("DEP-SETTLED")).thenReturn(Optional.of(
+				new BankTransaction("DEP-SETTLED", "DEPOSIT", settledDep, Money.vnd(100_000), "SUCCESS", null, veryOld)));
+		when(mockBankGateway.findTransaction("DEP-TIMEOUT")).thenReturn(Optional.of(
+				new BankTransaction("DEP-TIMEOUT", "DEPOSIT", timeoutDep, Money.vnd(120_000), "TIMEOUT", "timeout", veryOld)));
+		when(depositCommandHandler.deposit(settledDep, walletId, Money.vnd(100_000), "DEP-SETTLED"))
+				.thenReturn(DepositStatus.CONFIRMED);
+
+		when(queryRepository.findStalePendingWithdrawals(NOW.minusSeconds(300)))
+				.thenReturn(List.of(
+						txRow(settledWdr, walletId, "WITHDRAWAL", 200_000L, "PENDING", null, veryOld),
+						txRow(timeoutWdr, walletId, "WITHDRAWAL", 220_000L, "PENDING", null, veryOld),
+						txRow(mismatchWdr, walletId, "WITHDRAWAL", 250_000L, "PENDING", null, veryOld)));
+		when(withdrawalCommandHandler.reconcilePendingWithdrawal(settledWdr)).thenReturn(ReconcileOutcome.SETTLED);
+		when(withdrawalCommandHandler.reconcilePendingWithdrawal(timeoutWdr)).thenReturn(ReconcileOutcome.UNRESOLVED);
+		when(withdrawalCommandHandler.reconcilePendingWithdrawal(mismatchWdr)).thenReturn(ReconcileOutcome.MISMATCH);
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
+
+		ReconciliationRunResult result = service.reconcileStalePendingTransactions();
+
+		assertThat(result.runType()).isEqualTo("BANK_PENDING");
+		assertThat(result.issuesOpened()).isEqualTo(1);
+		verify(issueRepository).resolveOpenByDedupeKey(eq("BANK_MISMATCH:PENDING_DEPOSIT:" + settledDep),
+				eq(BankReconciliationService.AUTO_RESOLVED_BY), anyString(), eq(NOW));
+		verify(issueRepository).resolveOpenByDedupeKey(eq("BANK_MISMATCH:PENDING_WITHDRAWAL:" + settledWdr),
+				eq(BankReconciliationService.AUTO_RESOLVED_BY), anyString(), eq(NOW));
+		verify(issueRepository, never()).openIfAbsent(any(), eq("BANK_MISMATCH:PENDING_DEPOSIT:" + timeoutDep),
+				anyString(), any());
+		verify(issueRepository, never()).openIfAbsent(any(), eq("BANK_MISMATCH:PENDING_WITHDRAWAL:" + timeoutWdr),
+				anyString(), any());
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
+				eq("BANK_MISMATCH:PENDING_WITHDRAWAL:" + mismatchWdr), anyString(), eq(NOW));
+	}
+
+	@Test
+	void dailyRunEscalatesOldPendingWithdrawalsAndIsolatesFailedWithdrawalLookbackErrors() {
+		UUID youngWdr = UUID.randomUUID();
+		UUID oldWdr = UUID.randomUUID();
+		UUID failedErrWdr = UUID.randomUUID();
+		UUID failedOkWdr = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Instant youngTime = NOW.minusSeconds(600);
+		Instant oldTime = NOW.minusSeconds(90_000);
+
+		when(mockBankGateway.getDailyStatement(REPORT_DATE, BankReconciliationService.BANK_ZONE))
+				.thenReturn(List.of());
+		when(queryRepository.findSettledBankTransactions(any(), any())).thenReturn(List.of());
+		when(queryRepository.findStalePendingWithdrawals(NOW.minusSeconds(300)))
+				.thenReturn(List.of(
+						txRow(youngWdr, walletId, "WITHDRAWAL", 150_000L, "PENDING", null, youngTime),
+						txRow(oldWdr, walletId, "WITHDRAWAL", 250_000L, "PENDING", null, oldTime)));
+		when(withdrawalCommandHandler.reconcilePendingWithdrawal(youngWdr)).thenReturn(ReconcileOutcome.UNRESOLVED);
+		when(withdrawalCommandHandler.reconcilePendingWithdrawal(oldWdr)).thenReturn(ReconcileOutcome.UNRESOLVED);
+
+		Instant expectedLookbackStart = NOW.minus(Duration.ofDays(7));
+		when(queryRepository.findFailedWithdrawalsBetween(expectedLookbackStart, NOW))
+				.thenReturn(List.of(
+						txRow(failedErrWdr, walletId, "WITHDRAWAL", 300_000L, "FAILED", null, oldTime),
+						txRow(failedOkWdr, walletId, "WITHDRAWAL", 400_000L, "FAILED", null, oldTime)));
+		when(withdrawalCommandHandler.ensureCompensatedIfFailed(failedErrWdr))
+				.thenThrow(new IllegalStateException("transient db error"));
+		when(withdrawalCommandHandler.ensureCompensatedIfFailed(failedOkWdr)).thenReturn(true);
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
+
+		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
+
+		assertThat(result.issuesOpened()).isEqualTo(2);
+		verify(issueRepository, never()).openIfAbsent(any(), eq("BANK_MISMATCH:PENDING_WITHDRAWAL:" + youngWdr),
+				anyString(), any());
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
+				eq("BANK_MISMATCH:PENDING_WITHDRAWAL:" + oldWdr), anyString(), eq(NOW));
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
+				eq("BANK_MISMATCH:FAILED_WITHDRAWAL_COMPENSATION:" + failedErrWdr), anyString(), eq(NOW));
+		verify(withdrawalCommandHandler).ensureCompensatedIfFailed(failedOkWdr);
 	}
 
 	@Test
@@ -146,7 +268,6 @@ class BankReconciliationServiceUnitTest {
 				.thenReturn(List.of(new BankStatementEntry(longRef, "DEPOSIT", UUID.randomUUID(),
 						Money.vnd(100_000), "SUCCESS", txTime)));
 		when(queryRepository.findSettledBankTransactions(any(), any())).thenReturn(List.of());
-		when(queryRepository.findStalePendingDeposits(any())).thenReturn(List.of());
 		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenAnswer(inv -> {
 			String key = inv.getArgument(1);
 			assertThat(key.length()).isLessThanOrEqualTo(128);
@@ -176,6 +297,8 @@ class BankReconciliationServiceUnitTest {
 				new BankTransaction("PEND-NEXT", "DEPOSIT", okDep, Money.vnd(200_000), "SUCCESS", null, oldTime)));
 		when(depositCommandHandler.deposit(lockedDep, walletId, Money.vnd(100_000), "PEND-LOCKED"))
 				.thenThrow(new IllegalStateException("wallet locked"));
+		when(depositCommandHandler.deposit(okDep, walletId, Money.vnd(200_000), "PEND-NEXT"))
+				.thenReturn(DepositStatus.CONFIRMED);
 		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
 
 		ReconciliationRunResult result = service.reconcileDate(REPORT_DATE);
@@ -191,7 +314,7 @@ class BankReconciliationServiceUnitTest {
 		UUID verifiedDep = UUID.randomUUID();
 		UUID unresolvedDep = UUID.randomUUID();
 		UUID walletId = UUID.randomUUID();
-		Instant oldTime = NOW.minusSeconds(600);
+		Instant oldTime = NOW.minusSeconds(90_000);
 
 		when(mockBankGateway.getDailyStatement(REPORT_DATE, BankReconciliationService.BANK_ZONE))
 				.thenReturn(List.of());
@@ -212,6 +335,8 @@ class BankReconciliationServiceUnitTest {
 
 		assertThat(result.issuesOpened()).isEqualTo(1);
 		verify(depositCommandHandler).settleIfAlreadyVerified(verifiedDep, walletId, Money.vnd(400_000), "VERIFIED-EMPTY");
+		verify(issueRepository).resolveOpenByDedupeKey(eq("BANK_MISMATCH:PENDING_DEPOSIT:" + verifiedDep),
+				eq(BankReconciliationService.AUTO_RESOLVED_BY), anyString(), eq(NOW));
 		verify(depositCommandHandler).settleIfAlreadyVerified(unresolvedDep, walletId, Money.vnd(150_000), "UNKNOWN-EMPTY");
 		verify(depositCommandHandler, never()).deposit(eq(verifiedDep), any(), any(), any());
 		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),

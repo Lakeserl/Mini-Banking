@@ -122,6 +122,28 @@ public class QueryRepository {
 			ORDER BY occurred_at ASC, id ASC
 			""";
 
+	private static final String SELECT_STALE_PENDING_WITHDRAWALS_SQL = """
+			SELECT id, transaction_id, wallet_id, tx_type, direction, amount, currency, status,
+			       counterpart_wallet_id, counterpart_label, bank_reference, original_transfer_id,
+			       failure_reason, occurred_at, updated_at
+			FROM transaction_history
+			WHERE tx_type = 'WITHDRAWAL'
+			  AND status = 'PENDING'
+			  AND occurred_at <= ?
+			ORDER BY occurred_at ASC, id ASC
+			""";
+
+	private static final String SELECT_FAILED_WITHDRAWALS_BETWEEN_SQL = """
+			SELECT id, transaction_id, wallet_id, tx_type, direction, amount, currency, status,
+			       counterpart_wallet_id, counterpart_label, bank_reference, original_transfer_id,
+			       failure_reason, occurred_at, updated_at
+			FROM transaction_history
+			WHERE tx_type = 'WITHDRAWAL'
+			  AND status = 'FAILED'
+			  AND updated_at >= ? AND updated_at < ?
+			ORDER BY updated_at ASC, id ASC
+			""";
+
 	private static final RowMapper<WalletBalanceRow> BALANCE_MAPPER = (rs, i) -> new WalletBalanceRow(
 			rs.getObject("wallet_id", UUID.class),
 			rs.getObject("owner_id", UUID.class),
@@ -217,5 +239,19 @@ public class QueryRepository {
 		Objects.requireNonNull(olderThan, "olderThan");
 		return jdbc.query(SELECT_STALE_PENDING_DEPOSITS_SQL, TX_MAPPER,
 				OffsetDateTime.ofInstant(olderThan, ZoneOffset.UTC));
+	}
+
+	public List<TransactionHistoryRow> findStalePendingWithdrawals(Instant olderThan) {
+		Objects.requireNonNull(olderThan, "olderThan");
+		return jdbc.query(SELECT_STALE_PENDING_WITHDRAWALS_SQL, TX_MAPPER,
+				OffsetDateTime.ofInstant(olderThan, ZoneOffset.UTC));
+	}
+
+	public List<TransactionHistoryRow> findFailedWithdrawalsBetween(Instant fromInclusive, Instant toExclusive) {
+		Objects.requireNonNull(fromInclusive, "fromInclusive");
+		Objects.requireNonNull(toExclusive, "toExclusive");
+		return jdbc.query(SELECT_FAILED_WITHDRAWALS_BETWEEN_SQL, TX_MAPPER,
+				OffsetDateTime.ofInstant(fromInclusive, ZoneOffset.UTC),
+				OffsetDateTime.ofInstant(toExclusive, ZoneOffset.UTC));
 	}
 }

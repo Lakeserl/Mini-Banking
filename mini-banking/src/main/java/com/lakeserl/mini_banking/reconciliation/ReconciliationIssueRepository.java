@@ -45,8 +45,25 @@ public class ReconciliationIssueRepository {
 
 	private static final String INSERT_OPEN_SQL = """
 			INSERT INTO reconciliation_issues (issue_type, dedupe_key, details, status, detected_at)
-			VALUES (?, ?, ?::jsonb, 'OPEN', ?)
+			SELECT ?, ?, ?::jsonb, 'OPEN', ?
+			WHERE NOT EXISTS (
+				SELECT 1 FROM (
+					SELECT status, details
+					FROM reconciliation_issues
+					WHERE dedupe_key = ?
+					ORDER BY id DESC
+					LIMIT 1
+				) latest
+				WHERE latest.status = 'OPEN'
+				   OR (latest.status = 'RESOLVED' AND latest.details = ?::jsonb)
+			)
 			ON CONFLICT (dedupe_key) WHERE status = 'OPEN' DO NOTHING
+			""";
+
+	private static final String RESOLVE_OPEN_BY_DEDUPE_KEY_SQL = """
+			UPDATE reconciliation_issues
+			SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution_notes = ?
+			WHERE dedupe_key = ? AND status = 'OPEN'
 			""";
 
 	private static final String SELECT_COLUMNS = """
@@ -98,9 +115,11 @@ public class ReconciliationIssueRepository {
 	}
 
 	/**
-	 * Opens a new {@code OPEN} reconciliation issue if no {@code OPEN} issue with the same {@code dedupeKey} exists.
+	 * Opens a new {@code OPEN} reconciliation issue unless the latest row for {@code dedupeKey} is
+	 * already {@code OPEN} or was {@code RESOLVED} with identical {@code detailsJson}.
 	 *
-	 * @return {@code true} if a new issue was created, {@code false} if an identical open issue already existed.
+	 * @return {@code true} if a new issue was created, {@code false} if suppressed by an existing open
+	 *         or identically-detailed resolved issue.
 	 */
 	public boolean openIfAbsent(ReconciliationIssueType issueType, String dedupeKey, String detailsJson,
 			Instant detectedAt) {
@@ -112,8 +131,33 @@ public class ReconciliationIssueRepository {
 			throw new IllegalArgumentException("dedupeKey must be 1..128 non-blank characters");
 		}
 		int inserted = jdbc.update(INSERT_OPEN_SQL, issueType.name(), dedupeKey, detailsJson,
-				OffsetDateTime.ofInstant(detectedAt, ZoneOffset.UTC));
+				OffsetDateTime.ofInstant(detectedAt, ZoneOffset.UTC), dedupeKey, detailsJson);
 		return inserted == 1;
+	}
+
+	/**
+	 * Auto-resolves any {@code OPEN} reconciliation issue matching {@code dedupeKey}.
+	 *
+	 * @return {@code true} if an open issue was resolved, {@code false} if none was open.
+	 */
+	public boolean resolveOpenByDedupeKey(String dedupeKey, String resolvedBy, String resolutionNotes,
+			Instant resolvedAt) {
+		Objects.requireNonNull(dedupeKey, "dedupeKey");
+		Objects.requireNonNull(resolvedBy, "resolvedBy");
+		Objects.requireNonNull(resolutionNotes, "resolutionNotes");
+		Objects.requireNonNull(resolvedAt, "resolvedAt");
+		if (dedupeKey.isBlank() || dedupeKey.length() > 128) {
+			throw new IllegalArgumentException("dedupeKey must be 1..128 non-blank characters");
+		}
+		if (resolvedBy.isBlank()) {
+			throw new IllegalArgumentException("resolvedBy must not be blank");
+		}
+		if (resolutionNotes.isBlank()) {
+			throw new IllegalArgumentException("resolutionNotes must not be blank");
+		}
+		int updated = jdbc.update(RESOLVE_OPEN_BY_DEDUPE_KEY_SQL,
+				OffsetDateTime.ofInstant(resolvedAt, ZoneOffset.UTC), resolvedBy, resolutionNotes, dedupeKey);
+		return updated > 0;
 	}
 
 	public List<ReconciliationIssue> findByStatus(ReconciliationIssueStatus status, Cursor cursor, int fetchSize) {
