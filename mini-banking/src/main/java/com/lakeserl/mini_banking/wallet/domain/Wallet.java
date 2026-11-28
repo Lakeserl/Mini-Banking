@@ -181,8 +181,7 @@ public final class Wallet extends AggregateRoot {
 		Objects.requireNonNull(counterpartType, "counterpartType must not be null");
 		requireMovable(amount);
 		if (balance.isLessThan(amount)) {
-			throw new InsufficientFundsException(
-					"Wallet " + walletId + " has " + balance.amount() + " but " + amount.amount() + " is required");
+			throw new InsufficientFundsException("Insufficient funds");
 		}
 		raise(debitEventId(transactionId, walletId),
 				new WalletDebited(walletId, amount, transactionId, counterpartAccountId, counterpartType),

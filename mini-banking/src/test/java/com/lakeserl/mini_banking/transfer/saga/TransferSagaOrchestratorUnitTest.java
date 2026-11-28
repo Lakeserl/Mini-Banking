@@ -237,7 +237,7 @@ class TransferSagaOrchestratorUnitTest {
 		Transfer result = orchestrator.transfer(transferId, sourceId, destId, Money.vnd(200_000L));
 
 		assertThat(result.status()).isEqualTo(TransferStatus.REVERSED);
-		assertThat(result.failureReason()).contains("locked");
+		assertThat(result.failureReason()).isEqualTo("WALLET_LOCKED");
 		assertThat(transferRepository.load(transferId)).get().extracting(Transfer::status)
 				.isEqualTo(TransferStatus.REVERSED);
 		assertThat(sagaStateStore.findById(transferId)).get()
@@ -397,7 +397,7 @@ class TransferSagaOrchestratorUnitTest {
 		// When recovery reaches maxRetries at debit without debit event committed -> marks FAILED
 		Transfer failedAfterMaxRetries = orchestrator.resume(transferId, 3, 3);
 		assertThat(failedAfterMaxRetries.status()).isEqualTo(TransferStatus.FAILED);
-		assertThat(failedAfterMaxRetries.failureReason()).contains("Max recovery retries exceeded at debit");
+		assertThat(failedAfterMaxRetries.failureReason()).isEqualTo("DEBIT_FAILED");
 
 		// Now test contention exhaustion at CREDIT (DEBITED state): stays DEBITED during initial call,
 		// and starts compensation when recovery reaches maxRetries!
@@ -415,7 +415,7 @@ class TransferSagaOrchestratorUnitTest {
 		// Recovery retry 3 of 3 still failing -> transitions DEBITED -> REVERSING -> REVERSED and refunds source!
 		Transfer compensatedAfterMaxRetries = orchestrator.resume(transfer2Id, 3, 3);
 		assertThat(compensatedAfterMaxRetries.status()).isEqualTo(TransferStatus.REVERSED);
-		assertThat(compensatedAfterMaxRetries.failureReason()).contains("Max recovery retries exceeded at credit");
+		assertThat(compensatedAfterMaxRetries.failureReason()).isEqualTo("CREDIT_FAILED");
 		assertThat(walletRepository.load(sourceId)).get().extracting(Wallet::balance)
 				.isEqualTo(Money.vnd(1_000_000L));
 

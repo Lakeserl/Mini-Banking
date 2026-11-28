@@ -239,7 +239,7 @@ public class TransferSagaStateStore {
 		if (projectedTotal > dailyLimitVnd) {
 			throw new TransferPolicyViolationException(
 					"Daily outgoing transfer limit of " + dailyLimitVnd + " VND exceeded for wallet "
-							+ sourceWalletId + " (spent24h=" + spent24h + ", requested=" + requestedAmount + ")");
+							+ sourceWalletId);
 		}
 	}
 

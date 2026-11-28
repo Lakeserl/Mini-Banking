@@ -209,7 +209,7 @@ class TransferSagaOrchestratorTest {
 		Transfer resumed = orchestrator.resume(transferId, 0, 3);
 
 		assertThat(resumed.status()).isEqualTo(TransferStatus.REVERSED);
-		assertThat(resumed.failureReason()).contains("locked");
+		assertThat(resumed.failureReason()).isEqualTo("WALLET_LOCKED");
 		assertThat(transferRepository.load(transferId)).get().extracting(Transfer::status)
 				.isEqualTo(TransferStatus.REVERSED);
 		assertThat(sagaStateStore.findById(transferId)).get()

@@ -325,7 +325,7 @@ class SagaRecoverySchedulerUnitTest {
 				.satisfies(s -> {
 					assertThat(s.status()).isEqualTo(TransferStatus.FAILED);
 					assertThat(s.retryCount()).isEqualTo(3);
-					assertThat(s.failureReason()).contains("Max recovery retries exceeded at debit");
+					assertThat(s.failureReason()).isEqualTo("DEBIT_FAILED");
 				});
 		assertThat(walletRepository.load(sourceId)).get().extracting(Wallet::balance)
 				.isEqualTo(Money.vnd(500_000L));

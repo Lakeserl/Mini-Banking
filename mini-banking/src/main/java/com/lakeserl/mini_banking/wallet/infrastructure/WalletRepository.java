@@ -85,8 +85,8 @@ public class WalletRepository {
 					if (state == null || !walletId.equals(state.walletId())) {
 						log.warn("Snapshot state walletId mismatch: expected {}", walletId);
 					} else if (state.balance() < 0) {
-						log.warn("Snapshot state has invalid negative balance {} for wallet {}. Falling back to full replay.",
-								state.balance(), walletId);
+						log.warn("Snapshot state has invalid negative balance for wallet {} at version {}. Falling back to full replay.",
+								walletId, snapshot.version());
 					} else if (state.currency() == null || state.status() == null || state.ownerId() == null) {
 						log.warn("Snapshot state has null required fields for wallet {}. Falling back to full replay.", walletId);
 					} else if (snapshot.stateHash() == null || !snapshot.stateHash().equals(state.integrityHash())) {

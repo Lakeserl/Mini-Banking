@@ -195,8 +195,7 @@ public class WalletCommandHandler {
 	private void verifySameEvent(StoredEvent stored, DomainEvent expected) {
 		if (!stored.event().equals(expected)) {
 			throw new ConflictingTransactionException(stored.correlationId(),
-					"Transaction was already recorded with different parameters. Existing: "
-							+ stored.event() + ", Requested: " + expected);
+					"Transaction " + stored.eventId() + " was already recorded with different parameters");
 		}
 	}
 }

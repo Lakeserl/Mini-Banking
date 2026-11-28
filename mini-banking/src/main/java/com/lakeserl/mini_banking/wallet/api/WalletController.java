@@ -36,6 +36,7 @@ import com.lakeserl.mini_banking.wallet.domain.WalletStatus;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.WalletNotFoundException;
 import com.lakeserl.mini_banking.wallet.infrastructure.WalletRepository;
 import com.lakeserl.mini_banking.withdrawal.command.WithdrawalCommandHandler;
+import com.lakeserl.mini_banking.withdrawal.domain.Withdrawal;
 import com.lakeserl.mini_banking.withdrawal.domain.WithdrawalStatus;
 
 @RestController
@@ -61,6 +62,13 @@ public class WalletController {
 	}
 
 	public record WithdrawRequest(@Positive long amount, @NotNull Currency currency, @NotBlank String bankAccount) {
+		@Override
+		public String toString() {
+			String masked = (bankAccount == null || bankAccount.isBlank())
+					? "null"
+					: Withdrawal.maskAccount(bankAccount);
+			return "WithdrawRequest[amount=" + amount + ", currency=" + currency + ", bankAccount=" + masked + "]";
+		}
 	}
 
 	public record WithdrawResponse(UUID withdrawalId, UUID walletId, WithdrawalStatus status) {

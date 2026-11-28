@@ -282,6 +282,19 @@ public class TransferSagaOrchestrator {
 		return transferLocks[Math.floorMod(transferId.hashCode(), LOCK_STRIPES)];
 	}
 
+	private static String failureCodeFor(RuntimeException ex) {
+		if (ex instanceof InsufficientFundsException) {
+			return "INSUFFICIENT_FUNDS";
+		}
+		if (ex instanceof WalletLockedException) {
+			return "WALLET_LOCKED";
+		}
+		if (ex instanceof WalletNotFoundException) {
+			return "WALLET_NOT_FOUND";
+		}
+		return "TRANSFER_FAILED";
+	}
+
 	private Transfer advanceUnlocked(Transfer transfer, int currentRetryCount, int maxRetries) {
 		if (transfer.status() == TransferStatus.INITIATED) {
 			if (eventStore.findEvent(Wallet.debitEventId(transfer.id(), transfer.sourceWalletId())).isPresent()) {
@@ -295,7 +308,7 @@ public class TransferSagaOrchestrator {
 							TRANSFER_CLEARING_ACCOUNT, AccountType.CLEARING));
 					transfer = saveTransition(transfer, TransferStatus.INITIATED, Transfer::markDebitCompleted);
 				} catch (InsufficientFundsException | WalletLockedException | WalletNotFoundException ex) {
-					return saveTransition(transfer, TransferStatus.INITIATED, t -> t.fail(ex.getMessage()));
+					return saveTransition(transfer, TransferStatus.INITIATED, t -> t.fail(failureCodeFor(ex)));
 				} catch (RuntimeException ex) {
 					log.warn("Transient failure during debit for transfer {} (status={}, retry={}/{}): {}",
 							transfer.id(), transfer.status(), currentRetryCount, maxRetries, ex.getMessage(), ex);
@@ -304,7 +317,7 @@ public class TransferSagaOrchestrator {
 						transfer = saveTransition(transfer, TransferStatus.INITIATED, Transfer::markDebitCompleted);
 					} else if (currentRetryCount >= maxRetries) {
 						return saveTransition(transfer, TransferStatus.INITIATED,
-								t -> t.fail("Max recovery retries exceeded at debit: " + ex.getMessage()));
+								t -> t.fail("DEBIT_FAILED"));
 					} else {
 						return transfer;
 					}
@@ -322,7 +335,7 @@ public class TransferSagaOrchestrator {
 				return saveTransition(transfer, TransferStatus.DEBITED, Transfer::markCreditAndComplete);
 			} catch (WalletLockedException | WalletNotFoundException ex) {
 				transfer = saveTransition(transfer, TransferStatus.DEBITED,
-						t -> t.startCompensation(ex.getMessage()));
+						t -> t.startCompensation(failureCodeFor(ex)));
 			} catch (RuntimeException ex) {
 				log.warn("Transient failure during credit for transfer {} (status={}, retry={}/{}): {}",
 						transfer.id(), transfer.status(), currentRetryCount, maxRetries, ex.getMessage(), ex);
@@ -331,7 +344,7 @@ public class TransferSagaOrchestrator {
 					return saveTransition(transfer, TransferStatus.DEBITED, Transfer::markCreditAndComplete);
 				} else if (currentRetryCount >= maxRetries) {
 					transfer = saveTransition(transfer, TransferStatus.DEBITED,
-							t -> t.startCompensation("Max recovery retries exceeded at credit: " + ex.getMessage()));
+							t -> t.startCompensation("CREDIT_FAILED"));
 				} else {
 					return transfer;
 				}
