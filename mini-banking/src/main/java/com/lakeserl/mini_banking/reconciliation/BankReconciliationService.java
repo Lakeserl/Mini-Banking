@@ -239,67 +239,66 @@ public class BankReconciliationService {
 		for (TransactionHistoryRow pending : queryRepository.findStalePendingDeposits(settleCutoff)) {
 			String dedupeKey = boundDedupeKey("BANK_MISMATCH:PENDING_DEPOSIT:" + pending.transactionId());
 			String ref = pending.bankReference();
-			Money money = new Money(pending.amount(), Currency.valueOf(pending.currency()));
-			Optional<BankTransaction> bankTx = (ref == null || ref.isBlank())
-					? Optional.empty()
-					: mockBankGateway.findTransaction(ref);
-			if (bankTx.isPresent()
-					&& ("SUCCESS".equals(bankTx.get().status()) || "REJECTED".equals(bankTx.get().status()))) {
-				try {
-					DepositStatus settledStatus = depositCommandHandler.deposit(pending.transactionId(),
-							pending.walletId(), money, ref);
-					if (settledStatus != DepositStatus.PENDING) {
-						issueRepository.resolveOpenByDedupeKey(dedupeKey, AUTO_RESOLVED_BY,
-								"Auto-resolved: pending deposit settled (" + settledStatus + ")", checkedAt);
-					}
-				} catch (RuntimeException ex) {
-					log.warn("Failed to settle stale pending deposit {}; opening reconciliation issue",
-							pending.transactionId(), ex);
-					if (openIssue(dedupeKey,
-							Map.of("kind", "PENDING_DEPOSIT_SETTLE_FAILED",
-									"depositId", pending.transactionId().toString(),
-									"walletId", pending.walletId().toString(),
-									"bankReference", ref != null ? ref : "",
-									"bankStatus", bankTx.get().status(),
-									"error", ex.getClass().getSimpleName()),
-							checkedAt)) {
-						opened++;
-					}
-				}
-			} else {
-				boolean settled = false;
-				if (ref != null && !ref.isBlank()) {
+			try {
+				Money money = new Money(pending.amount(), Currency.valueOf(pending.currency()));
+				Optional<BankTransaction> bankTx = (ref == null || ref.isBlank())
+						? Optional.empty()
+						: mockBankGateway.findTransaction(ref);
+				if (bankTx.isPresent()
+						&& ("SUCCESS".equals(bankTx.get().status()) || "REJECTED".equals(bankTx.get().status()))) {
 					try {
-						settled = depositCommandHandler.settleIfAlreadyVerified(
-								pending.transactionId(), pending.walletId(), money, ref);
+						DepositStatus settledStatus = depositCommandHandler.deposit(pending.transactionId(),
+								pending.walletId(), money, ref);
+						if (settledStatus != DepositStatus.PENDING) {
+							issueRepository.resolveOpenByDedupeKey(dedupeKey, AUTO_RESOLVED_BY,
+									"Auto-resolved: pending deposit settled (" + settledStatus + ")", checkedAt);
+						}
 					} catch (RuntimeException ex) {
-						log.warn("Failed to settle already-verified pending deposit {}; opening reconciliation issue",
+						log.warn("Failed to settle stale pending deposit {}; opening reconciliation issue",
 								pending.transactionId(), ex);
 						if (openIssue(dedupeKey,
 								Map.of("kind", "PENDING_DEPOSIT_SETTLE_FAILED",
 										"depositId", pending.transactionId().toString(),
 										"walletId", pending.walletId().toString(),
-										"bankReference", ref,
+										"bankReference", ref != null ? ref : "",
+										"bankStatus", bankTx.get().status(),
 										"error", ex.getClass().getSimpleName()),
 								checkedAt)) {
 							opened++;
 						}
-						continue;
+					}
+				} else {
+					boolean settled = false;
+					if (ref != null && !ref.isBlank()) {
+						settled = depositCommandHandler.settleIfAlreadyVerified(
+								pending.transactionId(), pending.walletId(), money, ref);
+					}
+					if (settled) {
+						issueRepository.resolveOpenByDedupeKey(dedupeKey, AUTO_RESOLVED_BY,
+								"Auto-resolved: already-verified pending deposit settled", checkedAt);
+					} else if (escalateUnresolved && !pending.occurredAt().isAfter(escalationCutoff)) {
+						if (openIssue(dedupeKey,
+								Map.of("kind", "PENDING_DEPOSIT_UNRESOLVED",
+										"depositId", pending.transactionId().toString(),
+										"walletId", pending.walletId().toString(),
+										"bankReference", ref != null ? ref : "",
+										"bankStatus", bankTx.map(BankTransaction::status).orElse("MISSING")),
+								checkedAt)) {
+							opened++;
+						}
 					}
 				}
-				if (settled) {
-					issueRepository.resolveOpenByDedupeKey(dedupeKey, AUTO_RESOLVED_BY,
-							"Auto-resolved: already-verified pending deposit settled", checkedAt);
-				} else if (escalateUnresolved && !pending.occurredAt().isAfter(escalationCutoff)) {
-					if (openIssue(dedupeKey,
-							Map.of("kind", "PENDING_DEPOSIT_UNRESOLVED",
-									"depositId", pending.transactionId().toString(),
-									"walletId", pending.walletId().toString(),
-									"bankReference", ref != null ? ref : "",
-									"bankStatus", bankTx.map(BankTransaction::status).orElse("MISSING")),
-							checkedAt)) {
-						opened++;
-					}
+			} catch (RuntimeException ex) {
+				log.warn("Failed to reconcile stale pending deposit {}; opening reconciliation issue",
+						pending.transactionId(), ex);
+				if (openIssue(dedupeKey,
+						Map.of("kind", "PENDING_DEPOSIT_SETTLE_FAILED",
+								"depositId", pending.transactionId().toString(),
+								"walletId", pending.walletId().toString(),
+								"bankReference", ref != null ? ref : "",
+								"error", ex.getClass().getSimpleName()),
+						checkedAt)) {
+					opened++;
 				}
 			}
 		}
@@ -371,12 +370,15 @@ public class BankReconciliationService {
 		Instant dayLookback = dayStart.minus(Duration.ofDays(1));
 		Instant from = dayLookback.isBefore(lookbackStart) ? dayLookback : lookbackStart;
 		for (TransactionHistoryRow failed : queryRepository.findFailedWithdrawalsBetween(from, checkedAt)) {
+			String dedupeKey = boundDedupeKey("BANK_MISMATCH:FAILED_WITHDRAWAL_COMPENSATION:" + failed.transactionId());
 			try {
 				withdrawalCommandHandler.ensureCompensatedIfFailed(failed.transactionId());
+				issueRepository.resolveOpenByDedupeKey(dedupeKey, AUTO_RESOLVED_BY,
+						"Auto-resolved: failed withdrawal compensation verified", checkedAt);
 			} catch (RuntimeException ex) {
 				log.warn("Failed to verify compensation for failed withdrawal {}; opening reconciliation issue",
 						failed.transactionId(), ex);
-				if (openIssue("BANK_MISMATCH:FAILED_WITHDRAWAL_COMPENSATION:" + failed.transactionId(),
+				if (openIssue(dedupeKey,
 						Map.of("kind", "FAILED_WITHDRAWAL_COMPENSATION_ERROR",
 								"withdrawalId", failed.transactionId().toString(),
 								"walletId", failed.walletId().toString(),

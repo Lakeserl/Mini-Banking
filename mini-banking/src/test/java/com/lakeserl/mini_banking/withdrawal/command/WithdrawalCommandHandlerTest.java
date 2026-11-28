@@ -191,7 +191,11 @@ class WithdrawalCommandHandlerTest {
 		assertThat(debitCount).isEqualTo(1);
 		assertThat(walletRepository.load(walletId)).get().extracting(w -> w.balance()).isEqualTo(Money.vnd(650_000));
 
-		// Layer 2 (DB): exactly 1 terminal Withdrawal event
+		// Layer 2 (DB): exactly 1 WithdrawalRequested and 1 terminal Withdrawal event
+		Integer requestedCount = jdbc.queryForObject(
+				"SELECT COUNT(*) FROM events WHERE aggregate_id = ? AND event_type = 'WithdrawalRequested'",
+				Integer.class, withdrawalId);
+		assertThat(requestedCount).isEqualTo(1);
 		Integer terminalCount = jdbc.queryForObject(
 				"SELECT COUNT(*) FROM events WHERE aggregate_id = ? AND event_type IN ('WithdrawalConfirmed', 'WithdrawalFailed')",
 				Integer.class, withdrawalId);

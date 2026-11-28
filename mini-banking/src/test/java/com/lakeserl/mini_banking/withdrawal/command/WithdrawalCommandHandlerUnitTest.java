@@ -369,9 +369,7 @@ class WithdrawalCommandHandlerUnitTest {
 			debited.set(true);
 			return WalletCommandHandler.ApplyResult.APPLIED;
 		}).when(walletCommandHandler).debit(eq(walletId), eq(withdrawalId), eq(amount), any(), any());
-		CountDownLatch enteredPayout = new CountDownLatch(1);
 		when(mockBankGateway.payout(withdrawalId, amount, rawAccount)).thenAnswer(inv -> {
-			enteredPayout.countDown();
 			Thread.sleep(50);
 			return PayoutResult.success("BANK-PAY-" + withdrawalId);
 		});
@@ -505,5 +503,165 @@ class WithdrawalCommandHandlerUnitTest {
 		PayoutResult repeated = gateway.payout(id, amount, "97043612345678");
 		assertThat(repeated.status()).isEqualTo(PayoutStatus.SUCCESS);
 		assertThat(repeated.bankReference()).isEqualTo(settled.bankReference());
+	}
+
+	@Test
+	void concurrentFailDuringDebitSkipsPayoutAndCompensatesSafelyWhenBankHasNoRecord() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(200_000);
+		String rawAccount = "97043612345678";
+		AtomicReference<Withdrawal> stored = new AtomicReference<>();
+		wireInMemoryWithdrawalStore(withdrawalId, stored);
+
+		when(walletRepository.load(walletId)).thenReturn(Optional.of(activeFundedWallet(walletId, 500_000)));
+		AtomicBoolean debited = new AtomicBoolean(false);
+		when(eventStore.contains(Wallet.debitEventId(withdrawalId, walletId))).thenAnswer(inv -> debited.get());
+		doAnswer(inv -> {
+			debited.set(true);
+			// Simulate another instance concurrently marking the withdrawal FAILED before debit became visible
+			Withdrawal concurrent = stored.get();
+			concurrent.fail("Abandoned before wallet debit");
+			concurrent.markCommitted();
+			return WalletCommandHandler.ApplyResult.APPLIED;
+		}).when(walletCommandHandler).debit(eq(walletId), eq(withdrawalId), eq(amount), any(), any());
+
+		WithdrawalStatus status = handler.withdraw(withdrawalId, walletId, amount, rawAccount);
+
+		assertThat(status).isEqualTo(WithdrawalStatus.FAILED);
+		verify(mockBankGateway, never()).payout(any(), any(), any());
+		verify(walletCommandHandler).creditCompensation(
+				eq(walletId), eq(Withdrawal.reversalTransactionId(withdrawalId)), eq(amount),
+				eq(WithdrawalCommandHandler.BANK_SETTLEMENT_ACCOUNT), eq(AccountType.SETTLEMENT));
+	}
+
+	@Test
+	void compensateIfDebitedRefusesRefundWhenBankPayoutIsSuccessOrTimeout() {
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(250_000);
+		String rawAccount = "97043612345678";
+
+		// Case 1: Bank already paid SUCCESS on a FAILED withdrawal -> refuse compensation across all entrypoints
+		UUID paidId = UUID.randomUUID();
+		Withdrawal paidFailed = Withdrawal.request(paidId, walletId, amount, rawAccount, TEST_PEPPER);
+		paidFailed.fail("Abandoned before wallet debit");
+		paidFailed.markCommitted();
+		when(withdrawalRepository.load(paidId)).thenReturn(Optional.of(paidFailed));
+		when(eventStore.contains(Wallet.debitEventId(paidId, walletId))).thenReturn(true);
+		when(eventStore.contains(Wallet.creditEventId(Withdrawal.reversalTransactionId(paidId), walletId)))
+				.thenReturn(false);
+		when(mockBankGateway.findPayout(paidId)).thenReturn(Optional.of(new BankTransaction(
+				"BANK-PAY-" + paidId, "PAYOUT", paidId, amount, "SUCCESS", null, Instant.now())));
+
+		assertThatThrownBy(() -> handler.ensureCompensatedIfFailed(paidId))
+				.isInstanceOf(IllegalStateException.class);
+		assertThatThrownBy(() -> handler.reconcilePendingWithdrawal(paidId))
+				.isInstanceOf(IllegalStateException.class);
+		assertThatThrownBy(() -> handler.withdraw(paidId, walletId, amount, rawAccount))
+				.isInstanceOf(IllegalStateException.class);
+		verify(walletCommandHandler, never()).creditCompensation(eq(walletId),
+				eq(Withdrawal.reversalTransactionId(paidId)), any(), any(), any());
+
+		// Case 2: Bank payout status is TIMEOUT (uncertain) -> refuse compensation
+		UUID timeoutId = UUID.randomUUID();
+		Withdrawal timeoutFailed = Withdrawal.request(timeoutId, walletId, amount, rawAccount, TEST_PEPPER);
+		timeoutFailed.fail("Abandoned before wallet debit");
+		timeoutFailed.markCommitted();
+		when(withdrawalRepository.load(timeoutId)).thenReturn(Optional.of(timeoutFailed));
+		when(eventStore.contains(Wallet.debitEventId(timeoutId, walletId))).thenReturn(true);
+		when(eventStore.contains(Wallet.creditEventId(Withdrawal.reversalTransactionId(timeoutId), walletId)))
+				.thenReturn(false);
+		when(mockBankGateway.findPayout(timeoutId)).thenReturn(Optional.of(new BankTransaction(
+				"BANK-PAY-" + timeoutId, "PAYOUT", timeoutId, amount, "TIMEOUT", "timeout", Instant.now())));
+
+		assertThatThrownBy(() -> handler.ensureCompensatedIfFailed(timeoutId))
+				.isInstanceOf(IllegalStateException.class);
+		verify(walletCommandHandler, never()).creditCompensation(eq(walletId),
+				eq(Withdrawal.reversalTransactionId(timeoutId)), any(), any(), any());
+	}
+
+	@Test
+	void transientFindPayoutFailureInSettleWithBankDegradesToPendingWithoutCallingPayout() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(200_000);
+		String rawAccount = "97043612345678";
+		Withdrawal pending = Withdrawal.request(withdrawalId, walletId, amount, rawAccount, TEST_PEPPER);
+		pending.markCommitted();
+		when(withdrawalRepository.load(withdrawalId)).thenReturn(Optional.of(pending));
+		when(eventStore.contains(Wallet.debitEventId(withdrawalId, walletId))).thenReturn(true);
+		when(mockBankGateway.findPayout(withdrawalId)).thenThrow(new RuntimeException("bank lookup timed out"));
+
+		WithdrawalStatus status = handler.withdraw(withdrawalId, walletId, amount, rawAccount);
+
+		assertThat(status).isEqualTo(WithdrawalStatus.PENDING);
+		verify(mockBankGateway, never()).payout(any(), any(), any());
+	}
+
+	@Test
+	void findPayoutTimeoutWithMismatchedAmountFailsLoudlyWithoutCallingPayout() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(200_000);
+		String rawAccount = "97043612345678";
+		Withdrawal pending = Withdrawal.request(withdrawalId, walletId, amount, rawAccount, TEST_PEPPER);
+		pending.markCommitted();
+		when(withdrawalRepository.load(withdrawalId)).thenReturn(Optional.of(pending));
+		when(eventStore.contains(Wallet.debitEventId(withdrawalId, walletId))).thenReturn(true);
+		when(mockBankGateway.findPayout(withdrawalId)).thenReturn(Optional.of(new BankTransaction(
+				"BANK-PAY-" + withdrawalId, "PAYOUT", withdrawalId, Money.vnd(999_000), "TIMEOUT", "timeout",
+				Instant.now())));
+
+		assertThatThrownBy(() -> handler.withdraw(withdrawalId, walletId, amount, rawAccount))
+				.isInstanceOf(IllegalStateException.class);
+		verify(mockBankGateway, never()).payout(any(), any(), any());
+	}
+
+	@Test
+	void legacyDebitedOrphanOnLockedWalletStillPersistsAndSettles() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(300_000);
+		String rawAccount = "97043612345678";
+		AtomicReference<Withdrawal> stored = new AtomicReference<>();
+		wireInMemoryWithdrawalStore(withdrawalId, stored);
+
+		UUID debitEventId = Wallet.debitEventId(withdrawalId, walletId);
+		WalletDebited orphanDebit = new WalletDebited(walletId, amount, withdrawalId,
+				WithdrawalCommandHandler.BANK_SETTLEMENT_ACCOUNT, AccountType.SETTLEMENT);
+		when(eventStore.findEvent(debitEventId)).thenReturn(Optional.of(new StoredEvent(
+				debitEventId, walletId, "Wallet", 3L, "WalletDebited", 1, Instant.now(), withdrawalId, null,
+				orphanDebit)));
+		when(eventStore.contains(debitEventId)).thenReturn(true);
+
+		Wallet lockedWallet = activeFundedWallet(walletId, 0);
+		lockedWallet.lock("fraud review");
+		lockedWallet.markCommitted();
+		when(walletRepository.load(walletId)).thenReturn(Optional.of(lockedWallet));
+		when(mockBankGateway.payout(withdrawalId, amount, rawAccount))
+				.thenReturn(PayoutResult.success("BANK-PAY-LOCKED-ORPHAN"));
+
+		WithdrawalStatus status = handler.withdraw(withdrawalId, walletId, amount, rawAccount);
+
+		assertThat(status).isEqualTo(WithdrawalStatus.CONFIRMED);
+		verify(walletCommandHandler, never()).debit(any(), any(), any(), any(), any());
+		verify(mockBankGateway).payout(withdrawalId, amount, rawAccount);
+	}
+
+	@Test
+	void legacyOrphanDebitWithWrongCounterpartThrowsConflictingTransaction() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money amount = Money.vnd(300_000);
+		UUID debitEventId = Wallet.debitEventId(withdrawalId, walletId);
+		WalletDebited transferDebit = new WalletDebited(walletId, amount, withdrawalId,
+				UUID.randomUUID().toString(), AccountType.USER_WALLET);
+		when(withdrawalRepository.load(withdrawalId)).thenReturn(Optional.empty());
+		when(eventStore.findEvent(debitEventId)).thenReturn(Optional.of(new StoredEvent(
+				debitEventId, walletId, "Wallet", 3L, "WalletDebited", 1, Instant.now(), withdrawalId, null,
+				transferDebit)));
+
+		assertThatThrownBy(() -> handler.withdraw(withdrawalId, walletId, amount, "97043612345678"))
+				.isInstanceOf(ConflictingTransactionException.class);
 	}
 }

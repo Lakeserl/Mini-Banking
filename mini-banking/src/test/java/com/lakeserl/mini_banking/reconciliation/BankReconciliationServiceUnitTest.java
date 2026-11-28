@@ -258,6 +258,43 @@ class BankReconciliationServiceUnitTest {
 		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
 				eq("BANK_MISMATCH:FAILED_WITHDRAWAL_COMPENSATION:" + failedErrWdr), anyString(), eq(NOW));
 		verify(withdrawalCommandHandler).ensureCompensatedIfFailed(failedOkWdr);
+		verify(issueRepository).resolveOpenByDedupeKey(
+				eq("BANK_MISMATCH:FAILED_WITHDRAWAL_COMPENSATION:" + failedOkWdr),
+				eq(BankReconciliationService.AUTO_RESOLVED_BY), anyString(), eq(NOW));
+	}
+
+	@Test
+	void findTransactionErrorOnPendingDepositIsIsolatedAndDoesNotBlockWithdrawals() {
+		UUID failingDep = UUID.randomUUID();
+		UUID okDep = UUID.randomUUID();
+		UUID okWdr = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Instant oldTime = NOW.minusSeconds(600);
+
+		when(queryRepository.findStalePendingDeposits(NOW.minusSeconds(300)))
+				.thenReturn(List.of(
+						txRow(failingDep, walletId, "DEPOSIT", 100_000L, "PENDING", "DEP-ERR", oldTime),
+						txRow(okDep, walletId, "DEPOSIT", 200_000L, "PENDING", "DEP-OK", oldTime)));
+		when(mockBankGateway.findTransaction("DEP-ERR")).thenThrow(new RuntimeException("bank lookup failed"));
+		when(mockBankGateway.findTransaction("DEP-OK")).thenReturn(Optional.of(
+				new BankTransaction("DEP-OK", "DEPOSIT", okDep, Money.vnd(200_000), "SUCCESS", null, oldTime)));
+		when(depositCommandHandler.deposit(okDep, walletId, Money.vnd(200_000), "DEP-OK"))
+				.thenReturn(DepositStatus.CONFIRMED);
+
+		when(queryRepository.findStalePendingWithdrawals(NOW.minusSeconds(300)))
+				.thenReturn(List.of(txRow(okWdr, walletId, "WITHDRAWAL", 300_000L, "PENDING", null, oldTime)));
+		when(withdrawalCommandHandler.reconcilePendingWithdrawal(okWdr)).thenReturn(ReconcileOutcome.SETTLED);
+		when(issueRepository.openIfAbsent(any(), anyString(), anyString(), eq(NOW))).thenReturn(true);
+
+		ReconciliationRunResult result = service.reconcileStalePendingTransactions();
+
+		assertThat(result.issuesOpened()).isEqualTo(1);
+		verify(issueRepository).openIfAbsent(eq(ReconciliationIssueType.BANK_MISMATCH),
+				eq("BANK_MISMATCH:PENDING_DEPOSIT:" + failingDep), anyString(), eq(NOW));
+		verify(depositCommandHandler).deposit(okDep, walletId, Money.vnd(200_000), "DEP-OK");
+		verify(withdrawalCommandHandler).reconcilePendingWithdrawal(okWdr);
+		verify(issueRepository).resolveOpenByDedupeKey(eq("BANK_MISMATCH:PENDING_WITHDRAWAL:" + okWdr),
+				eq(BankReconciliationService.AUTO_RESOLVED_BY), anyString(), eq(NOW));
 	}
 
 	@Test

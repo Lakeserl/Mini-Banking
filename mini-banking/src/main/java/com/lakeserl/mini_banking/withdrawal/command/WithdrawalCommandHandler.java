@@ -122,7 +122,7 @@ public class WithdrawalCommandHandler {
 			}
 
 			Wallet wallet = walletRepository.load(walletId).orElseThrow(() -> new WalletNotFoundException(walletId));
-			if (wallet.status() != WalletStatus.ACTIVE) {
+			if (!alreadyDebited && wallet.status() != WalletStatus.ACTIVE) {
 				throw new WalletLockedException("Wallet " + walletId + " is locked");
 			}
 			Withdrawal created = Withdrawal.request(withdrawalId, walletId, amount, normalizedAccount,
@@ -180,7 +180,11 @@ public class WithdrawalCommandHandler {
 						current.fail(ABANDONED_PRE_DEBIT_REASON);
 					}
 				});
-				if (updated.status() != WithdrawalStatus.PENDING) {
+				if (updated.status() == WithdrawalStatus.CONFIRMED) {
+					return ReconcileOutcome.SETTLED;
+				}
+				if (updated.status() == WithdrawalStatus.FAILED) {
+					compensateIfDebited(updated.id(), updated.walletId(), updated.amount());
 					return ReconcileOutcome.SETTLED;
 				}
 			}
@@ -284,14 +288,20 @@ public class WithdrawalCommandHandler {
 	}
 
 	private WithdrawalStatus settleWithBank(UUID withdrawalId, UUID walletId, Money amount, String rawAccount) {
-		Optional<BankTransaction> existingTxOpt = mockBankGateway.findPayout(withdrawalId);
+		Optional<BankTransaction> existingTxOpt;
+		try {
+			existingTxOpt = mockBankGateway.findPayout(withdrawalId);
+		} catch (RuntimeException ex) {
+			log.warn("Transient failure checking bank payout for withdrawalId={}; keeping PENDING", withdrawalId, ex);
+			return WithdrawalStatus.PENDING;
+		}
 		if (existingTxOpt.isPresent()) {
 			BankTransaction tx = existingTxOpt.get();
+			if (!matchesBasePayoutInvariants(tx, withdrawalId, amount)) {
+				throw new IllegalStateException(
+						"Bank payout record failed invariant checks for withdrawal " + withdrawalId);
+			}
 			if (!"TIMEOUT".equals(tx.status())) {
-				if (!matchesBasePayoutInvariants(tx, withdrawalId, amount)) {
-					throw new IllegalStateException(
-							"Bank payout record failed invariant checks for withdrawal " + withdrawalId);
-				}
 				if ("SUCCESS".equals(tx.status())) {
 					if (tx.bankReference() == null || tx.bankReference().isBlank()) {
 						throw new IllegalStateException(
@@ -306,6 +316,18 @@ public class WithdrawalCommandHandler {
 				throw new IllegalStateException(
 						"Unexpected bank payout status for withdrawal " + withdrawalId + ": " + tx.status());
 			}
+		}
+
+		// Re-check Withdrawal status before initiating payout so a concurrent FAILED/CONFIRMED transition
+		// on another instance never sends a payout for an already-terminal withdrawal.
+		Withdrawal latest = withdrawalRepository.load(withdrawalId)
+				.orElseThrow(() -> new IllegalStateException("Withdrawal not found: " + withdrawalId));
+		if (latest.status() == WithdrawalStatus.CONFIRMED) {
+			return WithdrawalStatus.CONFIRMED;
+		}
+		if (latest.status() == WithdrawalStatus.FAILED) {
+			compensateIfDebited(withdrawalId, walletId, amount);
+			return WithdrawalStatus.FAILED;
 		}
 
 		PayoutResult payout;
@@ -362,6 +384,17 @@ public class WithdrawalCommandHandler {
 		if (isReversalCredited(withdrawalId, walletId)) {
 			return false;
 		}
+		// Never refund if the bank already settled SUCCESS or has an uncertain/mismatched payout record.
+		Optional<BankTransaction> bankTxOpt = mockBankGateway.findPayout(withdrawalId);
+		if (bankTxOpt.isPresent()) {
+			BankTransaction tx = bankTxOpt.get();
+			if (!"REJECTED".equals(tx.status()) || !matchesBasePayoutInvariants(tx, withdrawalId, amount)) {
+				log.error("Refusing compensation for withdrawalId={} walletId={}: bank payout status={}",
+						withdrawalId, walletId, tx.status());
+				throw new IllegalStateException(
+						"Refusing to compensate withdrawal " + withdrawalId + ": bank payout status is " + tx.status());
+			}
+		}
 		walletCommandHandler.creditCompensation(walletId, Withdrawal.reversalTransactionId(withdrawalId),
 				amount, BANK_SETTLEMENT_ACCOUNT, AccountType.SETTLEMENT);
 		return true;
@@ -404,7 +437,9 @@ public class WithdrawalCommandHandler {
 	private static void validateOrphanReversal(UUID withdrawalId, UUID walletId, Money amount, StoredEvent stored) {
 		if (!(stored.event() instanceof WalletCredited credited)
 				|| !credited.walletId().equals(walletId)
-				|| !credited.amount().equals(amount)) {
+				|| !credited.amount().equals(amount)
+				|| !BANK_SETTLEMENT_ACCOUNT.equals(credited.counterpartAccountId())
+				|| credited.counterpartAccountType() != AccountType.SETTLEMENT) {
 			throw new ConflictingTransactionException(withdrawalId,
 					"Withdrawal " + withdrawalId + " already exists with different parameters");
 		}
@@ -413,7 +448,9 @@ public class WithdrawalCommandHandler {
 	private static void validateOrphanDebit(UUID withdrawalId, UUID walletId, Money amount, StoredEvent stored) {
 		if (!(stored.event() instanceof WalletDebited debited)
 				|| !debited.walletId().equals(walletId)
-				|| !debited.amount().equals(amount)) {
+				|| !debited.amount().equals(amount)
+				|| !BANK_SETTLEMENT_ACCOUNT.equals(debited.counterpartAccountId())
+				|| debited.counterpartAccountType() != AccountType.SETTLEMENT) {
 			throw new ConflictingTransactionException(withdrawalId,
 					"Withdrawal " + withdrawalId + " already exists with different parameters");
 		}
