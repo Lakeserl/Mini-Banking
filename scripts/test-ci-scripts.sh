@@ -83,7 +83,7 @@ case "$1" in
     # Enforce real Docker Compose YAML interpolation failures when -f is used without required vars
     if [ -n "$compose_file" ]; then
       if [[ "$compose_file" == *"prod"* ]]; then
-        if [ -z "${POSTGRES_PASSWORD:-}" ] || [ -z "${DB_PASSWORD:-}" ] || [ -z "${PROD_JWT_ISSUER_URI:-}" ] || [ -z "${IMAGE_REF:-}" ]; then
+        if [ -z "${POSTGRES_PASSWORD:-}" ] || [ -z "${DB_PASSWORD:-}" ] || [ -z "${PROD_JWT_ISSUER_URI:-}" ] || [ -z "${IMAGE_REF:-}" ] || [ -z "${WITHDRAWAL_ACCOUNT_HASH_PEPPER:-}" ]; then
           echo "ERROR: missing required prod compose env vars for -f $compose_file" >&2
           exit 1
         fi
@@ -299,6 +299,7 @@ test_6_prod_deploy_dual_pointer_rotation_and_recovery_no_clobber() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     IMAGE_TAG="v1.0.0" \
     bash "$REPO_ROOT/scripts/ci-deploy.sh" prod
   assert_eq "v1.0.0" "$(cat "$TEST_TMP/backups/prod/prod-last-known-good.tag")" "initial last-known-good"
@@ -310,6 +311,7 @@ test_6_prod_deploy_dual_pointer_rotation_and_recovery_no_clobber() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     IMAGE_TAG="v1.1.0" \
     bash "$REPO_ROOT/scripts/ci-deploy.sh" prod
   assert_eq "v1.1.0" "$(cat "$TEST_TMP/backups/prod/prod-last-known-good.tag")" "upgraded last-known-good"
@@ -322,6 +324,7 @@ test_6_prod_deploy_dual_pointer_rotation_and_recovery_no_clobber() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     IMAGE_TAG="v1.1.0" \
     bash "$REPO_ROOT/scripts/ci-deploy.sh" prod
   assert_eq "v1.0.0" "$(cat "$TEST_TMP/backups/prod/prod-previous-good.tag")" "previous-good not clobbered on same-tag recovery"
@@ -360,6 +363,7 @@ test_7_prod_rollback_stopped_app_stops_dev_and_rolls_back_live_release() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     bash "$REPO_ROOT/scripts/ci-rollback.sh" 2>&1)
   assert_contains "$out_stopped" "Rolling back prod to tag: v1.0.0" "recovers last-known-good when stopped"
   assert_contains "$out_stopped" "ROLLBACK_TAG" "warns about consecutive rollbacks needing ROLLBACK_TAG"
@@ -375,6 +379,7 @@ test_7_prod_rollback_stopped_app_stops_dev_and_rolls_back_live_release() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     bash "$REPO_ROOT/scripts/ci-rollback.sh" 2>&1)
   assert_contains "$out_live" "Rolling back prod to tag: v0.9.0" "rolls back live release with registry port to previous-good"
 
@@ -389,6 +394,7 @@ test_7_prod_rollback_stopped_app_stops_dev_and_rolls_back_live_release() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     bash "$REPO_ROOT/scripts/ci-rollback.sh" 2>&1)
   assert_contains "$out_port" "Rolling back prod to tag: 5000/mini-banking" "does not treat registry port as tag"
 
@@ -402,6 +408,7 @@ test_7_prod_rollback_stopped_app_stops_dev_and_rolls_back_live_release() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     bash "$REPO_ROOT/scripts/ci-rollback.sh" 2>&1)
   assert_contains "$out_digest" "Rolling back prod to tag: deadbeef" "does not treat sha256 digest as tag"
 }
@@ -524,6 +531,10 @@ EOF
 
   assert_contains "$(cat "$gl")" 'if ! "${JAVA_HOME:-/nonexistent}/bin/java" -version' "java21_setup checks actual java version of JAVA_HOME"
   assert_contains "$(cat "$prod_c")" "- SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI" "prod compose forwards optional JWK_SET_URI"
+  assert_contains "$(cat "$prod_c")" 'WITHDRAWAL_ACCOUNT_HASH_PEPPER=${WITHDRAWAL_ACCOUNT_HASH_PEPPER:?' "prod compose requires WITHDRAWAL_ACCOUNT_HASH_PEPPER"
+  assert_contains "$(cat "$gl")" "WITHDRAWAL_ACCOUNT_HASH_PEPPER=" "gitlab test:prod passes WITHDRAWAL_ACCOUNT_HASH_PEPPER to compose config"
+  assert_contains "$(cat "$REPO_ROOT/scripts/ci-deploy.sh")" 'PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER:?' "ci-deploy.sh requires PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER"
+  assert_contains "$(cat "$REPO_ROOT/scripts/ci-backup.sh")" 'PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER:-backup-unused' "ci-backup.sh uses <32-byte placeholder when pepper unset"
   assert_contains "$(cat "$leg_c")" '"127.0.0.1:5410:5432"' "legacy docker-compose.yml binds loopback 127.0.0.1"
   assert_contains "$(cat "$prod_grants")" "to_regclass('public.flyway_schema_history')" "init-prod-db-grants.sql guards flyway_schema_history on re-run"
   assert_contains "$(cat "$prod_grants")" "REVOKE ALL ON TABLE public.flyway_schema_history FROM mb_prod_app" "init-prod-db-grants.sql revokes flyway_schema_history from mb_prod_app"
@@ -597,6 +608,7 @@ test_11_deploy_enforces_single_stack_exclusivity_and_ps_a_diagnostics() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     IMAGE_TAG="v1.0.0" \
     bash "$REPO_ROOT/scripts/ci-deploy.sh" prod >/dev/null
   p_down_line="$(grep -n "compose -p mini-banking down -t 35" "$MOCK_LOG" | head -n1 | cut -d: -f1)"
@@ -647,6 +659,7 @@ test_12_backup_and_rollback_fail_loudly_when_docker_compose_ps_errors() {
     PROD_POSTGRES_SUPER_PASSWORD=dummy PROD_DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod \
     PROD_DB_USERNAME=mb_prod_app PROD_DB_PASSWORD=dummy \
     PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking \
+    PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER=dummy-prod-pepper-at-least-32-bytes-0000 \
     bash "$REPO_ROOT/scripts/ci-rollback.sh" 2>&1)
   rc_rb=$?
   set -e

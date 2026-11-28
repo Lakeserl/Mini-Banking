@@ -37,6 +37,12 @@ wallet:
   command:
     max-optimistic-retries: 3
 
+withdrawal:
+  command:
+    max-optimistic-retries: 3
+  account-hash:
+    pepper: ${WITHDRAWAL_ACCOUNT_HASH_PEPPER:dev-only-withdrawal-account-hash-pepper-change-me}
+
 transfer:
   orchestrator:
     max-contention-retries: 12

@@ -1,8 +1,15 @@
 package com.lakeserl.mini_banking.withdrawal.domain;
 
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import com.lakeserl.mini_banking.shared.domain.AggregateRoot;
 import com.lakeserl.mini_banking.shared.domain.Currency;
@@ -20,7 +27,11 @@ import com.lakeserl.mini_banking.withdrawal.domain.events.WithdrawalRequested;
 public final class Withdrawal extends AggregateRoot {
 
 	public static final long MAX_SINGLE_WITHDRAWAL_VND = 50_000_000L;
+	public static final int MIN_PEPPER_BYTES = 32;
+	public static final String ACCOUNT_HASH_PREFIX = "v1:";
 
+	private static final String HMAC_ALGORITHM = "HmacSHA256";
+	private static final String ACCOUNT_HASH_DOMAIN = "withdrawal-account-v1|";
 	private static final UUID EVENT_ID_NAMESPACE = UUID.fromString("9c5d3a7e-1b24-4e68-a731-8f2c5d4e9b12");
 	private static final UUID REVERSAL_TX_NAMESPACE = UUID.fromString("2b7a9e4c-5f81-4d32-9c64-1a8e3f7b2c50");
 
@@ -28,6 +39,7 @@ public final class Withdrawal extends AggregateRoot {
 	private UUID walletId;
 	private Money amount;
 	private String bankAccount;
+	private String bankAccountHash;
 	private String bankReference;
 	private WithdrawalStatus status;
 	private String failureReason;
@@ -41,23 +53,74 @@ public final class Withdrawal extends AggregateRoot {
 		return DeterministicIds.v5(REVERSAL_TX_NAMESPACE, withdrawalId + "|reversal");
 	}
 
-	public static String maskAccount(String bankAccount) {
+	public static String normalizeBankAccount(String bankAccount) {
 		Objects.requireNonNull(bankAccount, "bankAccount must not be null");
 		String trimmed = bankAccount.trim();
 		if (trimmed.isEmpty()) {
 			throw new IllegalArgumentException("bankAccount must not be blank");
 		}
+		return trimmed;
+	}
+
+	public static String maskAccount(String bankAccount) {
+		String trimmed = normalizeBankAccount(bankAccount);
 		if (trimmed.length() <= 4) {
 			return "****";
 		}
 		return "****" + trimmed.substring(trimmed.length() - 4);
 	}
 
+	public static void validatePepper(String pepper) {
+		if (pepper == null || pepper.isBlank()) {
+			throw new IllegalArgumentException("withdrawal.account-hash.pepper must not be blank");
+		}
+		if (pepper.getBytes(StandardCharsets.UTF_8).length < MIN_PEPPER_BYTES) {
+			throw new IllegalArgumentException(
+					"withdrawal.account-hash.pepper must be at least " + MIN_PEPPER_BYTES + " UTF-8 bytes");
+		}
+	}
+
+	/** Computes a versioned HMAC-SHA256 fingerprint ({@code v1:<hex>}) bound to {@code withdrawalId}. */
+	public static String hmacAccount(UUID withdrawalId, String rawBankAccount, String pepper) {
+		Objects.requireNonNull(withdrawalId, "withdrawalId must not be null");
+		String normalized = normalizeBankAccount(rawBankAccount);
+		validatePepper(pepper);
+		try {
+			Mac mac = Mac.getInstance(HMAC_ALGORITHM);
+			mac.init(new SecretKeySpec(pepper.getBytes(StandardCharsets.UTF_8), HMAC_ALGORITHM));
+			byte[] digest = mac.doFinal((ACCOUNT_HASH_DOMAIN + withdrawalId + "|" + normalized)
+					.getBytes(StandardCharsets.UTF_8));
+			return ACCOUNT_HASH_PREFIX + HexFormat.of().formatHex(digest);
+		} catch (GeneralSecurityException ex) {
+			throw new IllegalStateException("Failed to compute HMAC-SHA256 bank account fingerprint", ex);
+		}
+	}
+
+	public static boolean constantTimeHashEquals(String expected, String actual) {
+		if (expected == null || actual == null) {
+			return false;
+		}
+		return MessageDigest.isEqual(
+				expected.getBytes(StandardCharsets.UTF_8),
+				actual.getBytes(StandardCharsets.UTF_8));
+	}
+
 	public static Withdrawal request(UUID withdrawalId, UUID walletId, Money amount, String bankAccount) {
+		return requestInternal(withdrawalId, walletId, amount, bankAccount, null);
+	}
+
+	public static Withdrawal request(UUID withdrawalId, UUID walletId, Money amount, String bankAccount, String pepper) {
+		validatePepper(pepper);
+		return requestInternal(withdrawalId, walletId, amount, bankAccount, pepper);
+	}
+
+	private static Withdrawal requestInternal(UUID withdrawalId, UUID walletId, Money amount, String bankAccount,
+			String pepper) {
 		Objects.requireNonNull(withdrawalId, "withdrawalId must not be null");
 		Objects.requireNonNull(walletId, "walletId must not be null");
 		Objects.requireNonNull(amount, "amount must not be null");
-		String maskedAccount = maskAccount(bankAccount);
+		String normalizedAccount = normalizeBankAccount(bankAccount);
+		String maskedAccount = maskAccount(normalizedAccount);
 		if (amount.currency() != Currency.VND) {
 			throw new IllegalArgumentException("Unsupported withdrawal currency: " + amount.currency());
 		}
@@ -68,9 +131,11 @@ public final class Withdrawal extends AggregateRoot {
 			throw new TransactionLimitExceededException(
 					"Withdrawal amount exceeds single-transaction limit of " + MAX_SINGLE_WITHDRAWAL_VND + " VND");
 		}
+		String accountHash = (pepper != null) ? hmacAccount(withdrawalId, normalizedAccount, pepper) : null;
 		Withdrawal withdrawal = new Withdrawal();
 		withdrawal.raise(eventId(withdrawalId, WithdrawalRequested.class),
-				new WithdrawalRequested(withdrawalId, walletId, amount, maskedAccount), withdrawalId, null);
+				new WithdrawalRequested(withdrawalId, walletId, amount, maskedAccount, accountHash),
+				withdrawalId, null);
 		return withdrawal;
 	}
 
@@ -157,6 +222,10 @@ public final class Withdrawal extends AggregateRoot {
 		return bankAccount;
 	}
 
+	public String bankAccountHash() {
+		return bankAccountHash;
+	}
+
 	public String bankReference() {
 		return bankReference;
 	}
@@ -188,6 +257,7 @@ public final class Withdrawal extends AggregateRoot {
 				walletId = e.walletId();
 				amount = e.amount();
 				bankAccount = e.bankAccount();
+				bankAccountHash = e.bankAccountHash();
 				status = WithdrawalStatus.PENDING;
 			}
 			case WithdrawalConfirmed e -> {

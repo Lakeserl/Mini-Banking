@@ -14,3 +14,7 @@ spring:
 security:
   dev-auth:
     enabled: false
+
+withdrawal:
+  account-hash:
+    pepper: ${WITHDRAWAL_ACCOUNT_HASH_PEPPER}

@@ -62,6 +62,8 @@ else
   export DB_USERNAME="${PROD_DB_USERNAME:-mb_prod_app}"
   export DB_PASSWORD="${PROD_DB_PASSWORD:?Set PROD_DB_PASSWORD}"
   export PROD_JWT_ISSUER_URI="${PROD_JWT_ISSUER_URI:?Set PROD_JWT_ISSUER_URI}"
+  # Deliberately <32 bytes so YAML interpolation passes for pg_dump while accidental app boot fails fast.
+  export WITHDRAWAL_ACCOUNT_HASH_PEPPER="${PROD_WITHDRAWAL_ACCOUNT_HASH_PEPPER:-backup-unused}"
   export CORS_ALLOWED_ORIGINS="${PROD_CORS_ALLOWED_ORIGINS:-}"
   export IMAGE_REF="${IMAGE_REF:-mini-banking:placeholder}"
 fi

@@ -71,7 +71,7 @@ test:prod:
   interruptible: true
   script:
     - ./mini-banking/mvnw -f mini-banking/pom.xml -B test -DargLine="-Xmx768m -Xms256m -Dspring.test.context.cache.maxSize=2"
-    - POSTGRES_PASSWORD=check IMAGE_REF=check:v0 DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod DB_USERNAME=mb_prod_app DB_PASSWORD=check PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking docker compose -f docker-compose.prod.yml config -q
+    - POSTGRES_PASSWORD=check IMAGE_REF=check:v0 DB_URL=jdbc:postgresql://postgres:5432/walletledger_prod DB_USERNAME=mb_prod_app DB_PASSWORD=check PROD_JWT_ISSUER_URI=https://issuer.example.test/realms/mini-banking WITHDRAWAL_ACCOUNT_HASH_PEPPER=check-only-pepper-at-least-32-bytes-0000 docker compose -f docker-compose.prod.yml config -q
 
 build:dev:
   extends:
