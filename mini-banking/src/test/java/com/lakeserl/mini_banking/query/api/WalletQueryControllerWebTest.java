@@ -1,5 +1,6 @@
 package com.lakeserl.mini_banking.query.api;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
@@ -8,6 +9,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -168,8 +170,12 @@ class WalletQueryControllerWebTest {
 		LocalDate from = LocalDate.of(2026, 11, 1);
 		LocalDate to = LocalDate.of(2026, 11, 21);
 
+		BigInteger hugeTotal = new BigInteger("10000000000000000000");
 		when(queryRepository.findDailyReports(from, to)).thenReturn(List.of(
-				new DailyReportRow(LocalDate.of(2026, 11, 21), "VND", 1_000_000L, 200_000L, 500_000L, 0L, 4L)));
+				new DailyReportRow(LocalDate.of(2026, 11, 21), "VND", BigInteger.valueOf(1_000_000L),
+						BigInteger.valueOf(200_000L), BigInteger.valueOf(500_000L), BigInteger.ZERO, 4L),
+				new DailyReportRow(LocalDate.of(2026, 11, 20), "VND", hugeTotal,
+						BigInteger.ZERO, BigInteger.ZERO, BigInteger.ZERO, 2L)));
 
 		mockMvc.perform(get("/api/reports/daily")
 						.param("from", "2026-11-01")
@@ -191,14 +197,18 @@ class WalletQueryControllerWebTest {
 								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
 				.andExpect(status().isBadRequest());
 
-		mockMvc.perform(get("/api/reports/daily")
+		String body = mockMvc.perform(get("/api/reports/daily")
 						.param("from", "2026-11-01")
 						.param("to", "2026-11-21")
 						.with(jwt().jwt(j -> j.subject(userId.toString()))
 								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$[0].date").value("2026-11-21"))
-				.andExpect(jsonPath("$[0].totalDeposit").value(1_000_000L))
-				.andExpect(jsonPath("$[0].transactionCount").value(4L));
+				.andExpect(jsonPath("$[0].totalDeposit").value(1_000_000))
+				.andExpect(jsonPath("$[0].transactionCount").value(4L))
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+		assertThat(body).contains("\"totalDeposit\":10000000000000000000");
 	}
 }

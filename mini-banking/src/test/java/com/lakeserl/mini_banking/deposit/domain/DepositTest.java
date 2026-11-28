@@ -15,6 +15,7 @@ import com.lakeserl.mini_banking.deposit.domain.events.DepositConfirmed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositFailed;
 import com.lakeserl.mini_banking.deposit.domain.events.DepositRequested;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.domain.TransactionLimitExceededException;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException;
 
 class DepositTest {
@@ -157,6 +158,31 @@ class DepositTest {
 
 		assertThat(replayed.bankReference()).isEqualTo(legacy150);
 		assertThat(replayed.isBankVerified()).isFalse();
+		assertThat(replayed.status()).isEqualTo(DepositStatus.CONFIRMED);
+	}
+
+	@Test
+	void requestAllowsExact50MillionCapAndRejectsAboveWithLimitExceeded() {
+		Deposit atCap = Deposit.request(UUID.randomUUID(), UUID.randomUUID(),
+				Money.vnd(Deposit.MAX_SINGLE_DEPOSIT_VND), "REF-AT-CAP");
+		assertThat(atCap.amount()).isEqualTo(Money.vnd(50_000_000L));
+
+		assertThatThrownBy(() -> Deposit.request(UUID.randomUUID(), UUID.randomUUID(),
+				Money.vnd(Deposit.MAX_SINGLE_DEPOSIT_VND + 1), "REF-OVER-CAP"))
+				.isInstanceOf(TransactionLimitExceededException.class);
+	}
+
+	@Test
+	void fromHistoryReplaysLegacyDepositAbove50MillionCap() {
+		UUID depositId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money legacyHuge = Money.vnd(Deposit.MAX_SINGLE_DEPOSIT_VND + 25_000_000L);
+
+		Deposit replayed = Deposit.fromHistory(List.of(
+				new DepositRequested(depositId, walletId, legacyHuge, "REF-LEGACY-BIG"),
+				new DepositConfirmed(depositId)));
+
+		assertThat(replayed.amount()).isEqualTo(legacyHuge);
 		assertThat(replayed.status()).isEqualTo(DepositStatus.CONFIRMED);
 	}
 }

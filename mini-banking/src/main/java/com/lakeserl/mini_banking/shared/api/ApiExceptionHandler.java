@@ -14,6 +14,7 @@ import com.lakeserl.mini_banking.query.rebuild.ProjectionRebuildService.RebuildI
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueAlreadyResolvedException;
 import com.lakeserl.mini_banking.reconciliation.ReconciliationIssueRepository.ReconciliationIssueNotFoundException;
 import com.lakeserl.mini_banking.shared.domain.CurrencyMismatchException;
+import com.lakeserl.mini_banking.shared.domain.TransactionLimitExceededException;
 import com.lakeserl.mini_banking.shared.eventsourcing.OptimisticConcurrencyException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.InvalidTransferStateException;
 import com.lakeserl.mini_banking.transfer.domain.exceptions.TransferNotFoundException;
@@ -47,6 +48,12 @@ public class ApiExceptionHandler {
 	ResponseEntity<ErrorResponse> handleTransferPolicyViolation(TransferPolicyViolationException ex) {
 		return ResponseEntity.status(422)
 				.body(new ErrorResponse("TRANSFER_POLICY_VIOLATION", ex.getMessage()));
+	}
+
+	@ExceptionHandler(TransactionLimitExceededException.class)
+	ResponseEntity<ErrorResponse> handleTransactionLimitExceeded(TransactionLimitExceededException ex) {
+		return ResponseEntity.status(422)
+				.body(new ErrorResponse("TRANSACTION_LIMIT_EXCEEDED", ex.getMessage()));
 	}
 
 	@ExceptionHandler(InvalidTransferStateException.class)

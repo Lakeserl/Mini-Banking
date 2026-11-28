@@ -394,4 +394,47 @@ class WalletApiIntegrationTest {
 
 		assertThat(walletRepository.load(walletId)).get().extracting(w -> w.balance()).isEqualTo(Money.vnd(250_000));
 	}
+
+	@Test
+	void depositAndWithdrawOver50MillionCapReturn422AndAllowSameIdempotencyKeyRetryWithout409() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		String ownerToken = bearerToken(ownerId);
+		UUID walletId = openWallet(ownerToken);
+
+		String depKey = "dep-over-cap-" + UUID.randomUUID();
+		String depBody = "{\"amount\":50000001,\"currency\":\"VND\",\"bankReference\":\"REF-OVER-" + UUID.randomUUID() + "\"}";
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", depKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(depBody))
+				.andExpect(status().is(422))
+				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
+
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", depKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(depBody))
+				.andExpect(status().is(422))
+				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
+
+		String wdKey = "wd-over-cap-" + UUID.randomUUID();
+		String wdBody = "{\"amount\":50000001,\"currency\":\"VND\",\"bankAccount\":\"97043612345678\"}";
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", wdKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(wdBody))
+				.andExpect(status().is(422))
+				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
+
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", wdKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(wdBody))
+				.andExpect(status().is(422))
+				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
+	}
 }

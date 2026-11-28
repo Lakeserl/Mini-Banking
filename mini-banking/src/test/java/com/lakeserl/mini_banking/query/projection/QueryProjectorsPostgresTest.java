@@ -2,7 +2,9 @@ package com.lakeserl.mini_banking.query.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.math.BigInteger;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.UUID;
@@ -110,5 +112,28 @@ class QueryProjectorsPostgresTest {
 		assertThat(ownerAWallets).allMatch(w -> w.ownerId().equals(ownerA));
 
 		assertThat(queryRepository.findBalancesByOwner(emptyOwner)).isEmpty();
+	}
+
+	@Test
+	void dailyReportsAccumulateBeyondLongMaxValueWithoutOverflow() {
+		UUID walletA = UUID.randomUUID();
+		UUID walletB = UUID.randomUUID();
+		UUID depositA = UUID.randomUUID();
+		UUID depositB = UUID.randomUUID();
+		long fiveQuintillion = 5_000_000_000_000_000_000L;
+		Instant ts = Instant.parse("2026-11-22T02:00:00Z");
+
+		txHistoryProjector.project(UUID.randomUUID(),
+				new DepositRequested(depositA, walletA, Money.vnd(fiveQuintillion), "REF-BIG-1"), ts);
+		txHistoryProjector.project(UUID.randomUUID(), new DepositConfirmed(depositA), ts.plusSeconds(1));
+		txHistoryProjector.project(UUID.randomUUID(),
+				new DepositRequested(depositB, walletB, Money.vnd(fiveQuintillion), "REF-BIG-2"), ts.plusSeconds(2));
+		txHistoryProjector.project(UUID.randomUUID(), new DepositConfirmed(depositB), ts.plusSeconds(3));
+
+		LocalDate reportDate = LocalDate.of(2026, 11, 22);
+		var reports = queryRepository.findDailyReports(reportDate, reportDate);
+		assertThat(reports).hasSize(1);
+		assertThat(reports.getFirst().totalDeposit()).isEqualTo(new BigInteger("10000000000000000000"));
+		assertThat(reports.getFirst().transactionCount()).isEqualTo(2L);
 	}
 }

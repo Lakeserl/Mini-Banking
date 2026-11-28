@@ -39,6 +39,7 @@ import com.lakeserl.mini_banking.mockbank.MockBankGateway.BankTransaction;
 import com.lakeserl.mini_banking.shared.api.ApiExceptionHandler;
 import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.domain.TransactionLimitExceededException;
 import com.lakeserl.mini_banking.shared.idempotency.IdempotencyService;
 import com.lakeserl.mini_banking.shared.idempotency.IdempotencyService.Decision;
 import com.lakeserl.mini_banking.shared.security.SecurityConfig;
@@ -283,6 +284,42 @@ class WalletApiWebTest {
 						.content("{\"amount\":50000,\"currency\":\"VND\",\"bankAccount\":\"970436-111\"}"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("CONFIRMED"));
+	}
+
+	@Test
+	void depositAndWithdrawExceedingSingleLimitReturn422AndReleaseIdempotencyKey() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
+		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
+		UUID depLease = UUID.randomUUID();
+		UUID wdLease = UUID.randomUUID();
+
+		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
+		when(idempotencyService.begin(eq(ownerId), eq("dep-limit"), anyString())).thenReturn(new Decision.Acquired(depLease));
+		when(depositCommandHandler.deposit(any(), eq(walletId), eq(Money.vnd(50_000_001L)), eq("REF-LIMIT")))
+				.thenThrow(new TransactionLimitExceededException("Single deposit limit exceeded"));
+
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
+						.header("Idempotency-Key", "dep-limit")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":50000001,\"currency\":\"VND\",\"bankReference\":\"REF-LIMIT\"}"))
+				.andExpect(status().is(422))
+				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
+		verify(idempotencyService).release(ownerId, "dep-limit", depLease);
+
+		when(idempotencyService.begin(eq(ownerId), eq("wd-limit"), anyString())).thenReturn(new Decision.Acquired(wdLease));
+		when(withdrawalCommandHandler.withdraw(any(), eq(walletId), eq(Money.vnd(50_000_001L)), eq("970436-111")))
+				.thenThrow(new TransactionLimitExceededException("Single withdrawal limit exceeded"));
+
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
+						.header("Idempotency-Key", "wd-limit")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":50000001,\"currency\":\"VND\",\"bankAccount\":\"970436-111\"}"))
+				.andExpect(status().is(422))
+				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
+		verify(idempotencyService).release(ownerId, "wd-limit", wdLease);
 	}
 
 	@Test

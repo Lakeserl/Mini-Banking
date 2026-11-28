@@ -9,6 +9,7 @@ import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.DeterministicIds;
 import com.lakeserl.mini_banking.shared.domain.DomainEvent;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.domain.TransactionLimitExceededException;
 import com.lakeserl.mini_banking.shared.eventsourcing.StoredEvent;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException;
 import com.lakeserl.mini_banking.withdrawal.domain.events.WithdrawalConfirmed;
@@ -17,6 +18,8 @@ import com.lakeserl.mini_banking.withdrawal.domain.events.WithdrawalRequested;
 
 /** Event-sourced cash-out lifecycle: PENDING -> CONFIRMED | FAILED. */
 public final class Withdrawal extends AggregateRoot {
+
+	public static final long MAX_SINGLE_WITHDRAWAL_VND = 50_000_000L;
 
 	private static final UUID EVENT_ID_NAMESPACE = UUID.fromString("9c5d3a7e-1b24-4e68-a731-8f2c5d4e9b12");
 	private static final UUID REVERSAL_TX_NAMESPACE = UUID.fromString("2b7a9e4c-5f81-4d32-9c64-1a8e3f7b2c50");
@@ -60,6 +63,10 @@ public final class Withdrawal extends AggregateRoot {
 		}
 		if (!amount.isPositive()) {
 			throw new InvalidAmountException("Withdrawal amount must be positive but was " + amount.amount());
+		}
+		if (amount.amount() > MAX_SINGLE_WITHDRAWAL_VND) {
+			throw new TransactionLimitExceededException(
+					"Withdrawal amount exceeds single-transaction limit of " + MAX_SINGLE_WITHDRAWAL_VND + " VND");
 		}
 		Withdrawal withdrawal = new Withdrawal();
 		withdrawal.raise(eventId(withdrawalId, WithdrawalRequested.class),

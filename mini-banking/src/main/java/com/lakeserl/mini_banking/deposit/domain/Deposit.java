@@ -14,6 +14,7 @@ import com.lakeserl.mini_banking.shared.domain.Currency;
 import com.lakeserl.mini_banking.shared.domain.DeterministicIds;
 import com.lakeserl.mini_banking.shared.domain.DomainEvent;
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.domain.TransactionLimitExceededException;
 import com.lakeserl.mini_banking.shared.eventsourcing.StoredEvent;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException;
 
@@ -21,6 +22,7 @@ import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException
 public final class Deposit extends AggregateRoot {
 
 	public static final int MAX_BANK_REFERENCE_LENGTH = 100;
+	public static final long MAX_SINGLE_DEPOSIT_VND = 50_000_000L;
 
 	private static final Pattern BANK_REFERENCE_PATTERN = Pattern.compile("\\A[A-Za-z0-9._-]{1,100}\\z");
 	private static final UUID EVENT_ID_NAMESPACE = UUID.fromString("4a6e2d1b-9c31-4f8b-8a05-2d9f7b4c1e31");
@@ -55,6 +57,10 @@ public final class Deposit extends AggregateRoot {
 		}
 		if (!amount.isPositive()) {
 			throw new InvalidAmountException("Deposit amount must be positive but was " + amount.amount());
+		}
+		if (amount.amount() > MAX_SINGLE_DEPOSIT_VND) {
+			throw new TransactionLimitExceededException(
+					"Deposit amount exceeds single-transaction limit of " + MAX_SINGLE_DEPOSIT_VND + " VND");
 		}
 		Deposit deposit = new Deposit();
 		deposit.raise(eventId(depositId, DepositRequested.class),

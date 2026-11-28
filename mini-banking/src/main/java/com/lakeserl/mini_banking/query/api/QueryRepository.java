@@ -1,5 +1,6 @@
 package com.lakeserl.mini_banking.query.api;
 
+import java.math.BigInteger;
 import java.sql.Date;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -33,8 +34,8 @@ public class QueryRepository {
 			Instant updatedAt) {
 	}
 
-	public record DailyReportRow(LocalDate date, String currency, long totalDeposit, long totalWithdrawal,
-			long totalTransfer, long totalRefund, long transactionCount) {
+	public record DailyReportRow(LocalDate date, String currency, BigInteger totalDeposit, BigInteger totalWithdrawal,
+			BigInteger totalTransfer, BigInteger totalRefund, long transactionCount) {
 	}
 
 	private static final String SELECT_BALANCE_SQL = """
@@ -150,10 +151,10 @@ public class QueryRepository {
 	private static final RowMapper<DailyReportRow> DAILY_MAPPER = (rs, i) -> new DailyReportRow(
 			rs.getDate("report_date").toLocalDate(),
 			rs.getString("currency"),
-			rs.getLong("total_deposit"),
-			rs.getLong("total_withdrawal"),
-			rs.getLong("total_transfer"),
-			rs.getLong("total_refund"),
+			rs.getBigDecimal("total_deposit").toBigIntegerExact(),
+			rs.getBigDecimal("total_withdrawal").toBigIntegerExact(),
+			rs.getBigDecimal("total_transfer").toBigIntegerExact(),
+			rs.getBigDecimal("total_refund").toBigIntegerExact(),
 			rs.getLong("tx_count"));
 
 	private final JdbcTemplate jdbc;

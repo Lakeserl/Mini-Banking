@@ -1,5 +1,6 @@
 package com.lakeserl.mini_banking.query.api;
 
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
@@ -50,8 +51,8 @@ public class WalletQueryController {
 	public record TransactionHistoryPage(List<TransactionItem> items, String nextCursor, boolean hasMore) {
 	}
 
-	public record DailyReportResponse(LocalDate date, String currency, long totalDeposit, long totalWithdrawal,
-			long totalTransfer, long totalRefund, long transactionCount) {
+	public record DailyReportResponse(LocalDate date, String currency, BigInteger totalDeposit,
+			BigInteger totalWithdrawal, BigInteger totalTransfer, BigInteger totalRefund, long transactionCount) {
 	}
 
 	private final QueryRepository queryRepository;

@@ -9,6 +9,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 import com.lakeserl.mini_banking.shared.domain.Money;
+import com.lakeserl.mini_banking.shared.domain.TransactionLimitExceededException;
 import com.lakeserl.mini_banking.wallet.domain.exceptions.InvalidAmountException;
 import com.lakeserl.mini_banking.withdrawal.domain.events.WithdrawalConfirmed;
 import com.lakeserl.mini_banking.withdrawal.domain.events.WithdrawalFailed;
@@ -88,5 +89,30 @@ class WithdrawalTest {
 				new WithdrawalRequested(withdrawalId, UUID.randomUUID(), Money.vnd(50_000), "970436"),
 				new WithdrawalFailed(UUID.randomUUID(), "wrong id"))))
 				.isInstanceOf(IllegalStateException.class);
+	}
+
+	@Test
+	void requestAllowsExact50MillionCapAndRejectsAboveWithLimitExceeded() {
+		Withdrawal atCap = Withdrawal.request(UUID.randomUUID(), UUID.randomUUID(),
+				Money.vnd(Withdrawal.MAX_SINGLE_WITHDRAWAL_VND), "97043612345678");
+		assertThat(atCap.amount()).isEqualTo(Money.vnd(50_000_000L));
+
+		assertThatThrownBy(() -> Withdrawal.request(UUID.randomUUID(), UUID.randomUUID(),
+				Money.vnd(Withdrawal.MAX_SINGLE_WITHDRAWAL_VND + 1), "97043612345678"))
+				.isInstanceOf(TransactionLimitExceededException.class);
+	}
+
+	@Test
+	void fromHistoryReplaysLegacyWithdrawalAbove50MillionCap() {
+		UUID withdrawalId = UUID.randomUUID();
+		UUID walletId = UUID.randomUUID();
+		Money legacyHuge = Money.vnd(Withdrawal.MAX_SINGLE_WITHDRAWAL_VND + 30_000_000L);
+
+		Withdrawal replayed = Withdrawal.fromHistory(List.of(
+				new WithdrawalRequested(withdrawalId, walletId, legacyHuge, "****5678"),
+				new WithdrawalConfirmed(withdrawalId, "BANK-PAY-OLD")));
+
+		assertThat(replayed.amount()).isEqualTo(legacyHuge);
+		assertThat(replayed.status()).isEqualTo(WithdrawalStatus.CONFIRMED);
 	}
 }
