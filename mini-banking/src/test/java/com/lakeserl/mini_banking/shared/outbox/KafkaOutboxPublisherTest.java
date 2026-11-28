@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.InterruptException;
@@ -109,6 +110,30 @@ class KafkaOutboxPublisherTest {
 			assertThatThrownBy(() -> publisher.publish(msg))
 					.isInstanceOf(OutboxPublishException.class)
 					.hasCause(interruptFailure);
+			assertThat(Thread.currentThread().isInterrupted()).isTrue();
+		} finally {
+			Thread.interrupted();
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void publishRestoresInterruptFlagAndWrapsFutureInterruptedException() {
+		OutboxMessage msg = new OutboxMessage(7L, UUID.randomUUID(), UUID.randomUUID(), "Wallet", "WalletOpened", "{}",
+				Instant.parse("2026-11-19T10:30:00Z"));
+		InterruptedException interrupted = new InterruptedException("thread interrupted");
+		CompletableFuture<SendResult<String, String>> interruptedFuture = new CompletableFuture<>() {
+			@Override
+			public SendResult<String, String> get(long timeout, TimeUnit unit) throws InterruptedException {
+				throw interrupted;
+			}
+		};
+		when(kafka.send(any(ProducerRecord.class))).thenReturn(interruptedFuture);
+		Thread.interrupted();
+		try {
+			assertThatThrownBy(() -> publisher.publish(msg))
+					.isInstanceOf(OutboxPublishException.class)
+					.hasCause(interrupted);
 			assertThat(Thread.currentThread().isInterrupted()).isTrue();
 		} finally {
 			Thread.interrupted();
