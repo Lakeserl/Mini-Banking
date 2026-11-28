@@ -32,6 +32,22 @@ public class InMemoryMockBankGateway implements MockBankGateway {
 		presetPayoutStatuses.put(withdrawalId, status);
 	}
 
+	/** Test helper to record or update a bank-side payout settlement directly. */
+	public void recordPayoutTransaction(UUID withdrawalId, Money amount, PayoutStatus status, Instant recordedAt) {
+		Objects.requireNonNull(withdrawalId, "withdrawalId must not be null");
+		Objects.requireNonNull(amount, "amount must not be null");
+		Objects.requireNonNull(status, "status must not be null");
+		Objects.requireNonNull(recordedAt, "recordedAt must not be null");
+		String bankReference = payoutBankReference(withdrawalId);
+		String reason = switch (status) {
+			case SUCCESS -> null;
+			case REJECTED -> "Mock bank rejected payout";
+			case TIMEOUT -> "Bank payout timeout";
+		};
+		transactions.put(bankReference, new BankTransaction(bankReference, "PAYOUT", withdrawalId, amount,
+				status.name(), reason, recordedAt));
+	}
+
 	/** Test helper to simulate extra, duplicate, or mismatched rows in the bank's daily statement. */
 	public void addStatementEntry(BankStatementEntry entry) {
 		injectedStatementEntries.add(Objects.requireNonNull(entry, "entry must not be null"));
@@ -61,16 +77,38 @@ public class InMemoryMockBankGateway implements MockBankGateway {
 	@Override
 	public PayoutResult payout(UUID withdrawalId, Money amount, String bankAccount) {
 		Objects.requireNonNull(withdrawalId, "withdrawalId must not be null");
-		PayoutStatus status = presetPayoutStatuses.getOrDefault(withdrawalId, PayoutStatus.SUCCESS);
-		String bankReference = "BANK-PAY-" + withdrawalId;
-		PayoutResult result = switch (status) {
-			case SUCCESS -> PayoutResult.success(bankReference);
-			case REJECTED -> PayoutResult.rejected("Mock bank rejected payout to " + maskAccount(bankAccount));
-			case TIMEOUT -> PayoutResult.timeout();
+		Objects.requireNonNull(amount, "amount must not be null");
+		String bankReference = payoutBankReference(withdrawalId);
+		// Freeze ONLY terminal payout outcomes (SUCCESS/REJECTED) so TIMEOUT remains retryable.
+		BankTransaction tx = transactions.compute(bankReference, (ref, existing) -> {
+			if (existing != null && ("SUCCESS".equals(existing.status()) || "REJECTED".equals(existing.status()))) {
+				return existing;
+			}
+			PayoutStatus status = presetPayoutStatuses.getOrDefault(withdrawalId, PayoutStatus.SUCCESS);
+			PayoutResult result = switch (status) {
+				case SUCCESS -> PayoutResult.success(ref);
+				case REJECTED -> PayoutResult.rejected("Mock bank rejected payout to " + maskAccount(bankAccount));
+				case TIMEOUT -> PayoutResult.timeout();
+			};
+			return new BankTransaction(ref, "PAYOUT", withdrawalId, amount,
+					result.status().name(), result.reason(), Instant.now());
+		});
+		return switch (tx.status()) {
+			case "SUCCESS" -> PayoutResult.success(tx.bankReference());
+			case "REJECTED" -> PayoutResult.rejected(tx.reason());
+			case "TIMEOUT" -> PayoutResult.timeout();
+			default -> throw new IllegalStateException("Unexpected bank payout status: " + tx.status());
 		};
-		transactions.put(bankReference, new BankTransaction(bankReference, "PAYOUT", withdrawalId, amount,
-				result.status().name(), result.reason(), Instant.now()));
-		return result;
+	}
+
+	@Override
+	public Optional<BankTransaction> findPayout(UUID withdrawalId) {
+		Objects.requireNonNull(withdrawalId, "withdrawalId must not be null");
+		return findTransaction(payoutBankReference(withdrawalId));
+	}
+
+	private static String payoutBankReference(UUID withdrawalId) {
+		return "BANK-PAY-" + withdrawalId;
 	}
 
 	private static String maskAccount(String bankAccount) {

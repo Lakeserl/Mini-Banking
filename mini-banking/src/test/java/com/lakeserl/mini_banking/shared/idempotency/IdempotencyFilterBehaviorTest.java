@@ -175,6 +175,60 @@ class IdempotencyFilterBehaviorTest {
 	}
 
 	@Test
+	void withdraw202MarksPendingInsteadOfCompleting() throws Exception {
+		UUID walletId = UUID.randomUUID();
+		MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/wallets/" + walletId + "/withdraw");
+		request.addHeader(IdempotencyFilter.HEADER, "wd-pending-key");
+		request.setContent("{\"amount\":100000,\"bankAccount\":\"97043612345678\"}".getBytes(StandardCharsets.UTF_8));
+		MockHttpServletResponse response = new MockHttpServletResponse();
+
+		UUID leaseToken = UUID.randomUUID();
+		when(idempotencyService.begin(any(), anyString(), anyString())).thenReturn(new Decision.Acquired(leaseToken));
+		FilterChain chain = (req, res) -> {
+			((MockHttpServletResponse) ((HttpServletResponseWrapper) res).getResponse()).setStatus(202);
+			res.getOutputStream().write("{\"status\":\"PENDING\"}".getBytes(StandardCharsets.UTF_8));
+		};
+
+		filter.doFilter(request, response, chain);
+
+		assertThat(response.getStatus()).isEqualTo(202);
+		assertThat(response.getContentAsString()).isEqualTo("{\"status\":\"PENDING\"}");
+		verify(idempotencyService).markPending(userId, "wd-pending-key", leaseToken);
+		verify(idempotencyService, never()).complete(any(), anyString(), any(), anyInt(), anyString());
+		verify(idempotencyService, never()).release(any(), anyString(), any());
+	}
+
+	@Test
+	void percentEncodedWithdraw202MarksPendingAndHashesCanonicalPath() throws Exception {
+		UUID walletId = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
+		byte[] body = "{\"amount\":100000}".getBytes(StandardCharsets.UTF_8);
+		String canonicalPath = "/api/wallets/" + walletId + "/withdraw";
+		String expectedHash = IdempotencyService.sha256("POST", canonicalPath, body);
+
+		MockHttpServletRequest request = new MockHttpServletRequest(
+				"POST", "/api/wallets/%3550e8400-e29b-41d4-a716-446655440000/%77ithdraw");
+		request.addHeader(IdempotencyFilter.HEADER, "wd-encoded-key");
+		request.setContent(body);
+		MockHttpServletResponse response = new MockHttpServletResponse();
+
+		UUID leaseToken = UUID.randomUUID();
+		when(idempotencyService.begin(eq(userId), eq("wd-encoded-key"), eq(expectedHash)))
+				.thenReturn(new Decision.Acquired(leaseToken));
+		FilterChain chain = (req, res) -> {
+			((MockHttpServletResponse) ((HttpServletResponseWrapper) res).getResponse()).setStatus(202);
+			res.getOutputStream().write("{\"status\":\"PENDING\"}".getBytes(StandardCharsets.UTF_8));
+		};
+
+		filter.doFilter(request, response, chain);
+
+		assertThat(response.getStatus()).isEqualTo(202);
+		verify(idempotencyService).begin(userId, "wd-encoded-key", expectedHash);
+		verify(idempotencyService).markPending(userId, "wd-encoded-key", leaseToken);
+		verify(idempotencyService, never()).complete(any(), anyString(), any(), anyInt(), anyString());
+		verify(idempotencyService, never()).release(any(), anyString(), any());
+	}
+
+	@Test
 	void completeDbFailureAfterCommitted200DoesNotReleaseKeyAndPreservesResponseBody() throws Exception {
 		MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/transfers");
 		request.addHeader(IdempotencyFilter.HEADER, "tx-complete-err");

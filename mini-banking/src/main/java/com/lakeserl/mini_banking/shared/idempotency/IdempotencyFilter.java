@@ -51,11 +51,12 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 	private static final int PAYLOAD_TOO_LARGE_STATUS = 413;
 	private static final PathPatternParser PATH_PARSER = PathPatternParser.defaultInstance;
 	private static final PathPattern DEPOSIT_PATH = PATH_PARSER.parse("/api/wallets/{id}/deposit");
+	private static final PathPattern WITHDRAW_PATH = PATH_PARSER.parse("/api/wallets/{id}/withdraw");
 	private static final List<PathPattern> IDEMPOTENT_PATHS = List.of(
 			PATH_PARSER.parse("/api/transfers"),
 			PATH_PARSER.parse("/api/transfers/{id}/refund"),
 			DEPOSIT_PATH,
-			PATH_PARSER.parse("/api/wallets/{id}/withdraw"));
+			WITHDRAW_PATH);
 
 	private final IdempotencyService idempotencyService;
 	private final JsonMapper mapper = JsonMapper.builder().build();
@@ -148,7 +149,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 					int status = wrappedResponse.getStatus();
 					if (status == HttpServletResponse.SC_ACCEPTED
 							&& pathWithinApp != null
-							&& DEPOSIT_PATH.matches(pathWithinApp)) {
+							&& (DEPOSIT_PATH.matches(pathWithinApp) || WITHDRAW_PATH.matches(pathWithinApp))) {
 						committed2xx = true;
 						try {
 							idempotencyService.markPending(userId, key, leaseToken);

@@ -134,7 +134,8 @@ public class WalletController {
 		UUID withdrawalId = DeterministicIds.v5(WITHDRAWAL_KEY_NAMESPACE, userId + "|" + idempotencyKey);
 		WithdrawalStatus status = withdrawalCommandHandler.withdraw(withdrawalId, id,
 				new Money(request.amount(), request.currency()), request.bankAccount());
-		return ResponseEntity.ok(new WithdrawResponse(withdrawalId, id, status));
+		HttpStatus httpStatus = (status == WithdrawalStatus.PENDING) ? HttpStatus.ACCEPTED : HttpStatus.OK;
+		return ResponseEntity.status(httpStatus).body(new WithdrawResponse(withdrawalId, id, status));
 	}
 
 	@PostMapping("/{id}/lock")

@@ -9,6 +9,15 @@ import java.util.UUID;
 
 import com.lakeserl.mini_banking.shared.domain.Money;
 
+/**
+ * Bank gateway abstraction for external deposit verification and cash-out payouts.
+ *
+ * <p>Production adapters <b>MUST</b> enforce idempotency keyed by {@code withdrawalId} on
+ * {@link #payout(UUID, Money, String)} (returning the settled terminal outcome on retries and never
+ * executing a second cash payout for the same {@code withdrawalId}) and configure bounded HTTP
+ * connect/read timeouts ({@code <= 5s}) so worker threads and per-withdrawal locks are not held
+ * indefinitely.
+ */
 public interface MockBankGateway {
 
 	enum VerificationStatus {
@@ -61,7 +70,15 @@ public interface MockBankGateway {
 
 	DepositVerificationResult verifyDeposit(UUID depositId, Money amount, String bankReference);
 
+	/**
+	 * Initiates or replays a payout keyed by {@code withdrawalId}. Production adapters MUST enforce
+	 * idempotency by {@code withdrawalId} and bound network timeouts to {@code <= 5s}.
+	 */
 	PayoutResult payout(UUID withdrawalId, Money amount, String bankAccount);
+
+	default Optional<BankTransaction> findPayout(UUID withdrawalId) {
+		return Optional.empty();
+	}
 
 	Optional<BankTransaction> findTransaction(String bankReference);
 

@@ -287,6 +287,31 @@ class WalletApiWebTest {
 	}
 
 	@Test
+	void withdrawReturningPendingReturns202AcceptedAndMarksIdempotencyPending() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
+		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
+		UUID leaseToken = UUID.randomUUID();
+
+		when(idempotencyService.begin(eq(ownerId), eq("w-pending"), anyString()))
+				.thenReturn(new Decision.Acquired(leaseToken));
+		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
+		when(withdrawalCommandHandler.withdraw(any(), eq(walletId), eq(Money.vnd(50_000)), eq("970436-111")))
+				.thenReturn(WithdrawalStatus.PENDING);
+
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.with(jwt().jwt(j -> j.subject(ownerId.toString())))
+						.header("Idempotency-Key", "w-pending")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":50000,\"currency\":\"VND\",\"bankAccount\":\"970436-111\"}"))
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("PENDING"));
+
+		verify(idempotencyService).markPending(ownerId, "w-pending", leaseToken);
+		verify(idempotencyService, never()).complete(any(), any(), any(), anyInt(), any());
+	}
+
+	@Test
 	void withdrawByNonOwnerAndNonOwnerAdminReturns403AndReleasesIdempotencyLock() throws Exception {
 		UUID ownerId = UUID.randomUUID();
 		UUID attackerId = UUID.randomUUID();

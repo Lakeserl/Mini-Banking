@@ -26,6 +26,7 @@ import org.springframework.test.web.servlet.MvcResult;
 
 import com.lakeserl.mini_banking.PostgresContainerInitializer;
 import com.lakeserl.mini_banking.mockbank.InMemoryMockBankGateway;
+import com.lakeserl.mini_banking.mockbank.MockBankGateway.PayoutStatus;
 import com.lakeserl.mini_banking.mockbank.MockBankGateway.VerificationStatus;
 import com.lakeserl.mini_banking.shared.domain.Money;
 import com.lakeserl.mini_banking.wallet.domain.WalletStatus;
@@ -479,5 +480,58 @@ class WalletApiIntegrationTest {
 		assertThat(jdbc.queryForObject(
 				"SELECT COUNT(*) FROM idempotency_keys WHERE user_id = ? AND idempotency_key = ?",
 				Integer.class, adminId, adminKey)).isZero();
+	}
+
+	@Test
+	void withdraw202PendingRetriesAfterBankSettlementTo200ConfirmedAndReplays() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		String ownerToken = bearerToken(ownerId);
+		UUID walletId = openWallet(ownerToken);
+
+		// Fund wallet with 500,000 VND
+		mockMvc.perform(post("/api/wallets/{id}/deposit", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", "seed-wd-202-" + UUID.randomUUID())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":500000,\"currency\":\"VND\",\"bankReference\":\"REF-WD202-"
+								+ UUID.randomUUID() + "\"}"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("CONFIRMED"));
+
+		String wdKey = "wd-pend-" + UUID.randomUUID();
+		String wdBody = "{\"amount\":200000,\"currency\":\"VND\",\"bankAccount\":\"97043612345678\"}";
+		UUID expectedWithdrawalId = com.lakeserl.mini_banking.shared.domain.DeterministicIds.v5(
+				UUID.fromString("7e4c9a1d-3b52-4f86-9c21-5a8b7d6e4f32"), ownerId + "|" + wdKey);
+		mockBank.presetPayout(expectedWithdrawalId, PayoutStatus.TIMEOUT);
+
+		// 1. Timeout -> 202 Accepted (PENDING), wallet debited and NOT refunded
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", wdKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(wdBody))
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("PENDING"));
+		assertThat(walletRepository.load(walletId)).get().extracting(w -> w.balance()).isEqualTo(Money.vnd(300_000));
+
+		// 2. Bank settles to SUCCESS -> retry same key converges to 200 OK (CONFIRMED)
+		mockBank.presetPayout(expectedWithdrawalId, PayoutStatus.SUCCESS);
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", wdKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(wdBody))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("CONFIRMED"));
+
+		// 3. Subsequent replay returns cached 200 without double debit
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, ownerToken)
+						.header("Idempotency-Key", wdKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(wdBody))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("CONFIRMED"));
+		assertThat(walletRepository.load(walletId)).get().extracting(w -> w.balance()).isEqualTo(Money.vnd(300_000));
 	}
 }
