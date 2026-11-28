@@ -165,6 +165,32 @@ class WalletQueryControllerWebTest {
 	}
 
 	@Test
+	void getTransactionsBlocksNonOwnerWith403AndAllowsAdminWith200() throws Exception {
+		UUID walletId = UUID.randomUUID();
+		UUID ownerId = UUID.randomUUID();
+		UUID strangerId = UUID.randomUUID();
+		UUID adminId = UUID.randomUUID();
+		Instant t1 = Instant.parse("2026-11-21T09:00:00Z");
+
+		when(queryRepository.findBalance(walletId)).thenReturn(Optional.of(
+				new WalletBalanceRow(walletId, ownerId, "VND", 500_000L, "ACTIVE", 3L, t1)));
+		TransactionHistoryRow row = new TransactionHistoryRow(1L, UUID.randomUUID(), walletId, "DEPOSIT", "IN",
+				500_000L, "VND", "CONFIRMED", null, "BANK_SETTLEMENT", "REF-1", null, null, t1, t1);
+		when(queryRepository.findTransactions(eq(walletId), isNull(), eq(21))).thenReturn(List.of(row));
+
+		mockMvc.perform(get("/api/wallets/{id}/transactions", walletId)
+						.with(jwt().jwt(j -> j.subject(strangerId.toString()))))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
+
+		mockMvc.perform(get("/api/wallets/{id}/transactions", walletId)
+						.with(jwt().jwt(j -> j.subject(adminId.toString()))
+								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.items.length()").value(1));
+	}
+
+	@Test
 	void getDailyReportsRequiresAdminAndValidDateRange() throws Exception {
 		UUID userId = UUID.randomUUID();
 		LocalDate from = LocalDate.of(2026, 11, 1);

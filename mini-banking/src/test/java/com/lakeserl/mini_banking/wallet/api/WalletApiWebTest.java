@@ -287,6 +287,45 @@ class WalletApiWebTest {
 	}
 
 	@Test
+	void withdrawByNonOwnerAndNonOwnerAdminReturns403AndReleasesIdempotencyLock() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID attackerId = UUID.randomUUID();
+		UUID adminId = UUID.randomUUID();
+		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);
+		Wallet wallet = Wallet.open(walletId, ownerId, Currency.VND);
+		UUID attackerLease = UUID.randomUUID();
+		UUID adminLease = UUID.randomUUID();
+
+		when(walletRepository.load(walletId)).thenReturn(Optional.of(wallet));
+		when(idempotencyService.begin(eq(attackerId), eq("wd-atk"), anyString()))
+				.thenReturn(new Decision.Acquired(attackerLease));
+		when(idempotencyService.begin(eq(adminId), eq("wd-admin"), anyString()))
+				.thenReturn(new Decision.Acquired(adminLease));
+
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.with(jwt().jwt(j -> j.subject(attackerId.toString())))
+						.header("Idempotency-Key", "wd-atk")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":50000,\"currency\":\"VND\",\"bankAccount\":\"970436-111\"}"))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
+		verify(idempotencyService).release(attackerId, "wd-atk", attackerLease);
+
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.with(jwt().jwt(j -> j.subject(adminId.toString()).claim("roles", List.of("ADMIN")))
+								.authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+						.header("Idempotency-Key", "wd-admin")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"amount\":50000,\"currency\":\"VND\",\"bankAccount\":\"970436-111\"}"))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
+		verify(idempotencyService).release(adminId, "wd-admin", adminLease);
+
+		verify(withdrawalCommandHandler, never()).withdraw(any(), any(), any(), any());
+		verify(idempotencyService, never()).complete(any(), any(), any(), anyInt(), any());
+	}
+
+	@Test
 	void depositAndWithdrawExceedingSingleLimitReturn422AndReleaseIdempotencyKey() throws Exception {
 		UUID ownerId = UUID.randomUUID();
 		UUID walletId = Wallet.calculateWalletId(ownerId, Currency.VND);

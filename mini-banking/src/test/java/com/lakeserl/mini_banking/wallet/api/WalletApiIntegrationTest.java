@@ -437,4 +437,47 @@ class WalletApiIntegrationTest {
 				.andExpect(status().is(422))
 				.andExpect(jsonPath("$.error").value("TRANSACTION_LIMIT_EXCEEDED"));
 	}
+
+	@Test
+	void withdraw403ByNonOwnerAndNonOwnerAdminReleasesIdempotencyKeyRow() throws Exception {
+		UUID ownerId = UUID.randomUUID();
+		UUID strangerId = UUID.randomUUID();
+		UUID adminId = UUID.randomUUID();
+		String ownerToken = bearerToken(ownerId);
+		String strangerToken = bearerToken(strangerId);
+		String adminToken = bearerToken(adminId, "ADMIN");
+		UUID walletId = openWallet(ownerToken);
+
+		String strangerKey = "wd-stranger-" + UUID.randomUUID();
+		String body = "{\"amount\":100000,\"currency\":\"VND\",\"bankAccount\":\"97043612345678\"}";
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, strangerToken)
+						.header("Idempotency-Key", strangerKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(body))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
+		assertThat(jdbc.queryForObject(
+				"SELECT COUNT(*) FROM idempotency_keys WHERE user_id = ? AND idempotency_key = ?",
+				Integer.class, strangerId, strangerKey)).isZero();
+
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, strangerToken)
+						.header("Idempotency-Key", strangerKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(body))
+				.andExpect(status().isForbidden());
+
+		String adminKey = "wd-admin-" + UUID.randomUUID();
+		mockMvc.perform(post("/api/wallets/{id}/withdraw", walletId)
+						.header(HttpHeaders.AUTHORIZATION, adminToken)
+						.header("Idempotency-Key", adminKey)
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(body))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.error").value("FORBIDDEN"));
+		assertThat(jdbc.queryForObject(
+				"SELECT COUNT(*) FROM idempotency_keys WHERE user_id = ? AND idempotency_key = ?",
+				Integer.class, adminId, adminKey)).isZero();
+	}
 }
