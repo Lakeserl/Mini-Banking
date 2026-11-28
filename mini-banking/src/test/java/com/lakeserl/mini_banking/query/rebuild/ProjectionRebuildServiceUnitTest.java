@@ -8,9 +8,11 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +37,7 @@ import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.lakeserl.mini_banking.deposit.domain.events.DepositConfirmed;
@@ -68,6 +71,8 @@ class ProjectionRebuildServiceUnitTest {
 	void setUp() {
 		eventStore = mock(EventStore.class);
 		jdbc = mock(JdbcTemplate.class);
+		when(jdbc.queryForObject(contains("pg_try_advisory_xact_lock"), eq(Boolean.class), anyLong()))
+				.thenReturn(Boolean.TRUE);
 		tx = mock(TransactionTemplate.class);
 		when(tx.execute(any(TransactionCallback.class))).thenAnswer(inv -> {
 			TransactionCallback<Object> cb = inv.getArgument(0);
@@ -94,7 +99,7 @@ class ProjectionRebuildServiceUnitTest {
 	}
 
 	@Test
-	void rebuildPausesListenersTruncatesReplaysAllBatchesInOrderAndResumes() {
+	void rebuildStopsListenersClearsReplaysAllBatchesAtomicallyAndStarts() {
 		UUID walletId = UUID.randomUUID();
 		UUID ownerId = UUID.randomUUID();
 		UUID depositId = UUID.randomUUID();
@@ -120,9 +125,11 @@ class ProjectionRebuildServiceUnitTest {
 
 		assertThat(result.eventsReplayed()).isEqualTo(4L);
 		assertThat(result.completedAt()).isEqualTo(Instant.parse("2026-11-21T10:00:00Z"));
+		verify(tx, times(1)).execute(any(TransactionCallback.class));
 
 		InOrder order = inOrder(container, jdbc, ledgerProjector, balanceProjector, txHistoryProjector);
-		order.verify(container).pause();
+		order.verify(container).stop();
+		order.verify(jdbc).queryForObject(contains("pg_try_advisory_xact_lock"), eq(Boolean.class), anyLong());
 		order.verify(jdbc).update("DELETE FROM ledger_entries");
 		order.verify(jdbc).update("DELETE FROM wallet_balances");
 		order.verify(jdbc).update("DELETE FROM transaction_history");
@@ -141,40 +148,70 @@ class ProjectionRebuildServiceUnitTest {
 				t1.plusSeconds(2));
 		order.verify(txHistoryProjector).project(e4.storedEvent().eventId(), e4.storedEvent().event(),
 				t1.plusSeconds(3));
-		order.verify(container).resume();
+		order.verify(container).start();
 		verify(jdbc, never()).execute(anyString());
 	}
 
 	@Test
-	void rebuildResumesListenersAndReleasesLockEvenWhenReplayThrows() {
+	void rebuildStartsListenersAndReleasesLockEvenWhenReplayThrows() {
 		when(eventStore.loadBatch(0L, 2))
 				.thenThrow(new IllegalStateException("db hiccup"))
 				.thenReturn(List.of());
 
 		assertThatThrownBy(() -> service.rebuildAll()).isInstanceOf(IllegalStateException.class);
-		verify(container).pause();
-		verify(container).resume();
+		verify(container).stop();
+		verify(container).start();
 
-		// Lock must be released so a subsequent rebuild succeeds
 		assertThat(service.rebuildAll().eventsReplayed()).isZero();
 	}
 
 	@Test
-	void pauseFailureStillResumesEarlierContainersAndReleasesLock() {
+	void stopFailureStillStartsEarlierContainersAndReleasesLock() {
 		MessageListenerContainer c1 = mock(MessageListenerContainer.class);
 		MessageListenerContainer c2 = mock(MessageListenerContainer.class);
 		when(c1.isRunning()).thenReturn(true);
 		when(c2.isRunning()).thenReturn(true);
-		org.mockito.Mockito.doThrow(new IllegalStateException("pause failed")).when(c2).pause();
+		doThrow(new IllegalStateException("stop failed")).when(c2).stop();
 		when(registry.getListenerContainers()).thenReturn(List.of(c1, c2));
 
 		assertThatThrownBy(() -> service.rebuildAll())
 				.isInstanceOf(IllegalStateException.class)
-				.hasMessageContaining("pause failed");
-		verify(c1).pause();
-		verify(c1).resume();
+				.hasMessageContaining("stop failed");
+		verify(c1).stop();
+		verify(c1).start();
 
 		when(registry.getListenerContainers()).thenReturn(List.of(container));
+		when(eventStore.loadBatch(0L, 2)).thenReturn(List.of());
+		assertThat(service.rebuildAll().eventsReplayed()).isZero();
+	}
+
+	@Test
+	void advisoryLockContentionThrowsRebuildInProgressExceptionAndRestartsContainers() {
+		when(jdbc.queryForObject(contains("pg_try_advisory_xact_lock"), eq(Boolean.class), anyLong()))
+				.thenReturn(Boolean.FALSE);
+
+		assertThatThrownBy(() -> service.rebuildAll())
+				.isInstanceOf(ProjectionRebuildService.RebuildInProgressException.class);
+
+		verify(container).stop();
+		verify(container).start();
+		verify(jdbc, never()).update(anyString());
+		verify(eventStore, never()).loadBatch(anyLong(), anyInt());
+	}
+
+	@Test
+	void rebuildRejectsCallInsideActiveOuterTransactionWithoutWedgingRunningGuard() {
+		TransactionSynchronizationManager.setActualTransactionActive(true);
+		try {
+			assertThatThrownBy(() -> service.rebuildAll())
+					.isInstanceOf(IllegalStateException.class);
+			verify(container, never()).stop();
+			verify(container, never()).start();
+			verify(tx, never()).execute(any(TransactionCallback.class));
+		} finally {
+			TransactionSynchronizationManager.setActualTransactionActive(false);
+		}
+
 		when(eventStore.loadBatch(0L, 2)).thenReturn(List.of());
 		assertThat(service.rebuildAll().eventsReplayed()).isZero();
 	}
